@@ -1,67 +1,53 @@
-# Insurance Core desk icon fix (v16 Desktop Layout)
+# Insurance Core desk icon fix (v16 Desktop Layout + logo)
 
-## Root cause
+## Symptoms
 
-On Frappe **v16**, the home desk is driven by **two** sources:
+1. **Icon missing on home desk** even though Desktop Icon list has "Insurance Core".
+2. **Icon shows as gray letter "I"** instead of the shield / app logo.
 
-1. **Desktop Icon** — global catalogue of icons (your row exists and is visible in the list).
-2. **Desktop Layout** — per-user JSON (`Desktop Layout` DocType, named by user).  
-   If this layout was saved *before* Insurance Core existed, the icon never appears on `/app` even when Desktop Icon is correct. Stale layout overrides the live icon list.
+## Root causes
 
-The Healthcare “Insurance” tile in the layout is a **different** icon (healthcare submodule), not Insurance Core.
+### Missing from Desktop Layout
+On Frappe **v16**, the home desk is driven by per-user **Desktop Layout** JSON, not only **Desktop Icon**. If the layout was saved before Insurance Core existed, the icon never appears.
 
-Earlier `install.py` only created/unhid Desktop Icon + Workspace. It never patched Desktop Layout.
+### Letter avatar ("I" on gray)
+The desk tile template uses `logo_url` when set; otherwise it falls back to a letter avatar from the label (first letter → **"I"** for Insurance Core). Setting only `icon: "shield"` is not enough on the home grid.
+
+The Healthcare "Insurance" tile is a different icon (healthcare submodule).
 
 ## Fix (in artifacts/install.py)
 
 `ensure_desktop_icon()` now:
 
-1. Calls `create_desktop_icons()`.
-2. Ensures Desktop Icon `Insurance Core` (Link → Workspace Sidebar, icon=shield, unhidden).
-3. **Patches every Desktop Layout**: appends an Insurance Core entry if missing.
-4. Clears cache.
+1. Creates/repairs Desktop Icon with `icon=shield`, **`logo_url=/assets/insurance_core/images/insurance.svg`**, `bg_color=blue`.
+2. Appends **or repairs** Insurance Core in every Desktop Layout (sets `logo_url` on existing entries so the letter avatar is replaced).
+3. Clears cache.
 
-## Apply on the site
-
-```bash
-# Copy fixed install into the app
-cp /path/to/artifacts/install.py apps/insurance_core/insurance_core/install.py
-
-bench --site <site> migrate
-bench --site <site> clear-cache
-```
-
-Or one-shot from console (no file copy required for an immediate fix):
+## One-shot console fix (run now)
 
 ```bash
 bench --site <site> console
 ```
 
 ```python
-from insurance_core.install import ensure_module, ensure_workspace, ensure_desktop_icon
-ensure_module()
-ensure_workspace()
-ensure_desktop_icon()
-frappe.db.commit()
-frappe.clear_cache()
-```
-
-If the app still has the **old** install.py without the layout patch, run this instead:
-
-```python
 import json
 import frappe
 
 label = "Insurance Core"
+logo_url = "/assets/insurance_core/images/insurance.svg"
 
-# 1) Desktop Icon
+# 1) Desktop Icon — force logo so letter avatar goes away
 if frappe.db.exists("Desktop Icon", label):
     doc = frappe.get_doc("Desktop Icon", label)
     doc.hidden = 0
+    doc.icon_type = "Link"
     doc.link_type = "Workspace Sidebar"
     doc.link_to = label
-    if hasattr(doc, "icon") and not doc.icon:
-        doc.icon = "shield"
+    doc.icon = "shield"
+    doc.logo_url = logo_url
+    doc.bg_color = "blue"
+    if hasattr(doc, "app"):
+        doc.app = "insurance_core"
     doc.save(ignore_permissions=True)
 else:
     frappe.get_doc({
@@ -71,30 +57,15 @@ else:
         "link_type": "Workspace Sidebar",
         "link_to": label,
         "icon": "shield",
+        "logo_url": logo_url,
+        "bg_color": "blue",
+        "app": "insurance_core",
         "standard": 1,
         "hidden": 0,
         "idx": 0,
     }).insert(ignore_permissions=True)
 
-# 2) Patch every Desktop Layout
-icon_entry = {
-    "label": label,
-    "name": label,
-    "icon_type": "Link",
-    "link_type": "Workspace Sidebar",
-    "link_to": label,
-    "icon": "shield",
-    "app": "insurance_core",
-    "standard": 1,
-    "hidden": 0,
-    "idx": 20,
-    "parent_icon": None,
-    "bg_color": None,
-    "logo_url": None,
-    "icon_image": None,
-    "restrict_removal": 0,
-    "child_icons": [],
-}
+# 2) Patch every Desktop Layout (inject or repair logo_url)
 for row in frappe.get_all("Desktop Layout", fields=["name", "user", "layout"]):
     try:
         layout = json.loads(row.layout or "[]")
@@ -102,38 +73,84 @@ for row in frappe.get_all("Desktop Layout", fields=["name", "user", "layout"]):
         continue
     if not isinstance(layout, list):
         continue
-    if any(isinstance(i, dict) and (i.get("label") == label or i.get("name") == label) for i in layout):
-        continue
-    layout.append(icon_entry)
-    doc = frappe.get_doc("Desktop Layout", row.name)
-    doc.layout = json.dumps(layout)
-    doc.save(ignore_permissions=True)
+    changed = False
+    found = False
+    for item in layout:
+        if not isinstance(item, dict):
+            continue
+        if item.get("label") != label and item.get("name") != label:
+            continue
+        found = True
+        if item.get("logo_url") != logo_url:
+            item["logo_url"] = logo_url
+            changed = True
+        if item.get("icon") != "shield":
+            item["icon"] = "shield"
+            changed = True
+        if not item.get("bg_color"):
+            item["bg_color"] = "blue"
+            changed = True
+        break
+    if not found:
+        layout.append({
+            "label": label,
+            "name": label,
+            "icon_type": "Link",
+            "link_type": "Workspace Sidebar",
+            "link_to": label,
+            "icon": "shield",
+            "logo_url": logo_url,
+            "bg_color": "blue",
+            "app": "insurance_core",
+            "standard": 1,
+            "hidden": 0,
+            "idx": 20,
+            "parent_icon": None,
+            "icon_image": None,
+            "restrict_removal": 0,
+            "child_icons": [],
+        })
+        changed = True
+    if changed:
+        doc = frappe.get_doc("Desktop Layout", row.name)
+        doc.layout = json.dumps(layout)
+        doc.save(ignore_permissions=True)
 
 frappe.db.commit()
 frappe.clear_cache()
-print("Done — hard-refresh Desk (/app)")
+print("Done — hard-refresh /app (Ctrl+Shift+R)")
 ```
 
 ## Verify
 
 ```python
-frappe.db.exists("Workspace", "Insurance Core")
-frappe.db.get_value("Workspace", "Insurance Core", ["public", "is_hidden", "icon"])
-frappe.db.exists("Desktop Icon", "Insurance Core")
-frappe.db.get_value("Desktop Icon", "Insurance Core", ["hidden", "link_type", "link_to", "icon"])
+print(frappe.db.get_value("Desktop Icon", "Insurance Core",
+      ["logo_url", "icon", "bg_color", "hidden"], as_dict=1))
 
-# Layout must list Insurance Core
 import json
 layout = frappe.db.get_value("Desktop Layout", "Administrator", "layout")
-items = json.loads(layout or "[]")
-print([i.get("label") for i in items if "Insur" in str(i.get("label", ""))])
+for i in json.loads(layout or "[]"):
+    if i.get("label") == "Insurance Core":
+        print(i.get("logo_url"), i.get("icon"), i.get("bg_color"))
 ```
 
-Then hard-refresh Desk (`/app`). You should see **Insurance Core** as a top-level tile (distinct from Healthcare’s Insurance).
+Expect:
 
-## Optional: reset layout entirely
+- `logo_url` = `/assets/insurance_core/images/insurance.svg`
+- `icon` = `shield`
+- `bg_color` = `blue`
 
-If the desk is still messy, delete the user’s Desktop Layout so Frappe rebuilds from Desktop Icons:
+Hard-refresh Desk. You should see the Insurance Core logo (not the letter **I**).
+
+## Permanent
+
+```bash
+cp artifacts/install.py apps/insurance_core/insurance_core/install.py
+bench --site <site> migrate
+bench --site <site> clear-cache
+```
+
+## Optional: reset layout
 
 ```python
 frappe.delete_doc("Desktop Layout", "Administrator", force=1, ignore_permissions=True)
@@ -141,4 +158,4 @@ frappe.db.commit()
 frappe.clear_cache()
 ```
 
-Log out and back in (or hard-refresh).
+Then log out/in so the layout rebuilds from Desktop Icons (which now have `logo_url`).
