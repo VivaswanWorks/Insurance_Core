@@ -269,6 +269,129 @@
         <router-view />
       </main>
     </div>
+
+    <!-- Floating chatbot avatar (real image, not icon/emoji) -->
+    <button
+      type="button"
+      class="chat-avatar fixed z-50 bottom-5 right-5 sm:bottom-6 sm:right-6
+             h-14 w-14 sm:h-16 sm:w-16 rounded-full overflow-hidden
+             shadow-lg ring-2 ring-white
+             focus:outline-none focus:ring-4 focus:ring-indigo-300
+             transition-transform duration-200 hover:scale-105 active:scale-95"
+      :class="{ 'scale-95': chatOpen }"
+      aria-label="Open insurance assistant"
+      @click="toggleChat"
+    >
+      <img
+        :src="assistantAvatarUrl"
+        alt="Insurance assistant"
+        class="h-full w-full object-cover"
+        @error="onAvatarError"
+      />
+      <span
+        class="absolute bottom-0.5 right-0.5 h-3.5 w-3.5 rounded-full
+               bg-emerald-500 ring-2 ring-white"
+        title="Online"
+      />
+    </button>
+
+    <!-- Chat panel -->
+    <transition name="chat-panel">
+      <div
+        v-if="chatOpen"
+        class="fixed z-50 bottom-24 right-4 sm:right-6
+               w-[min(100vw-2rem,22rem)] max-h-[min(70vh,32rem)]
+               flex flex-col bg-white border border-gray-200 rounded-2xl
+               shadow-2xl overflow-hidden"
+        role="dialog"
+        aria-label="Insurance assistant chat"
+      >
+        <header class="flex items-center gap-3 px-4 py-3 border-b bg-gray-50 shrink-0">
+          <img
+            :src="assistantAvatarUrl"
+            alt=""
+            class="h-9 w-9 rounded-full object-cover"
+            @error="onAvatarError"
+          />
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-semibold text-gray-900 truncate">Insurance Assistant</div>
+            <div class="text-xs text-emerald-600">
+              {{ chatSending ? 'Thinking…' : 'Online · policies & claims' }}
+            </div>
+          </div>
+          <button
+            type="button"
+            class="h-8 w-8 rounded-md text-gray-500 hover:bg-gray-200 text-lg leading-none"
+            aria-label="Close chat"
+            @click="chatOpen = false"
+          >
+            ×
+          </button>
+        </header>
+
+        <div ref="chatScroll" class="flex-1 overflow-y-auto p-3 space-y-3 text-sm">
+          <div v-if="!chatMessages.length" class="text-gray-500 text-center py-4 space-y-3">
+            <p>Ask about coverages, claim status, or documents needed.</p>
+            <div class="flex flex-wrap justify-center gap-2">
+              <button
+                v-for="chip in chatSuggestions"
+                :key="chip"
+                type="button"
+                class="px-2.5 py-1 rounded-full border border-gray-200 bg-white
+                       text-xs text-gray-700 hover:bg-gray-50"
+                @click="sendSuggestion(chip)"
+              >
+                {{ chip }}
+              </button>
+            </div>
+          </div>
+          <div
+            v-for="(m, i) in chatMessages"
+            :key="i"
+            class="flex"
+            :class="m.role === 'user' ? 'justify-end' : 'justify-start'"
+          >
+            <div
+              class="max-w-[85%] rounded-2xl px-3 py-2 whitespace-pre-wrap break-words"
+              :class="
+                m.role === 'user'
+                  ? 'bg-gray-900 text-white rounded-br-md'
+                  : m.error
+                    ? 'bg-red-50 text-red-800 border border-red-100 rounded-bl-md'
+                    : 'bg-gray-100 text-gray-900 rounded-bl-md'
+              "
+            >
+              {{ m.content }}
+            </div>
+          </div>
+          <div v-if="chatSending" class="flex justify-start">
+            <div class="bg-gray-100 text-gray-500 rounded-2xl rounded-bl-md px-3 py-2 text-xs">
+              Typing…
+            </div>
+          </div>
+        </div>
+
+        <form class="border-t p-2 flex gap-2 shrink-0" @submit.prevent="sendChat">
+          <input
+            v-model="chatInput"
+            type="text"
+            placeholder="Type a question…"
+            class="flex-1 h-10 px-3 rounded-lg border border-gray-200 text-sm
+                   focus:outline-none focus:ring-2 focus:ring-indigo-300"
+            :disabled="chatSending"
+            autocomplete="off"
+          />
+          <button
+            type="submit"
+            class="h-10 px-3 rounded-lg bg-gray-900 text-white text-sm font-medium
+                   hover:bg-gray-800 disabled:opacity-50"
+            :disabled="chatSending || !chatInput.trim()"
+          >
+            Send
+          </button>
+        </form>
+      </div>
+    </transition>
   </div>
 </template>
 
@@ -312,6 +435,18 @@ export default {
       searchQuery: '',
       searchTimer: null,
       loggingOut: false,
+      // Chatbot floating avatar
+      chatOpen: false,
+      chatInput: '',
+      chatSending: false,
+      chatSessionId: null,
+      chatMessages: [],
+      avatarFallback: false,
+      chatSuggestions: [
+        'What documents for a motor claim?',
+        'How do I intimate a claim?',
+        'What does my policy cover?',
+      ],
       // Health open by default; other LOBs collapsed
       openSections: {
         health: true,
@@ -478,6 +613,25 @@ export default {
     searchResults() {
       return this.$resources.search?.data || { policies: [], claims: [] }
     },
+    assistantAvatarUrl() {
+      if (this.avatarFallback) {
+        // SVG data-URI portrait placeholder (not emoji) if asset missing
+        return (
+          'data:image/svg+xml,' +
+          encodeURIComponent(
+            `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+              <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#4f46e5"/><stop offset="100%" stop-color="#7c3aed"/>
+              </linearGradient></defs>
+              <circle cx="64" cy="64" r="64" fill="url(#g)"/>
+              <circle cx="64" cy="48" r="22" fill="#e0e7ff"/>
+              <ellipse cx="64" cy="98" rx="36" ry="28" fill="#e0e7ff"/>
+            </svg>`
+          )
+        )
+      }
+      return '/assets/insurance_core/images/assistant-avatar.png'
+    },
   },
   resources: {
     me: {
@@ -507,11 +661,22 @@ export default {
     collapsed(v) {
       localStorage.setItem('insurance_portal_sidebar_collapsed', v ? '1' : '0')
     },
+    chatMessages() {
+      this.$nextTick(() => this.scrollChatToBottom())
+    },
+    chatSending(v) {
+      if (v) this.$nextTick(() => this.scrollChatToBottom())
+    },
   },
   mounted() {
     document.addEventListener('click', this.onDocClick)
     const saved = localStorage.getItem('insurance_portal_sidebar_collapsed')
     if (saved === '1') this.collapsed = true
+    try {
+      this.chatSessionId = sessionStorage.getItem('insurance_portal_chat_session') || null
+    } catch (e) {
+      /* ignore */
+    }
   },
   beforeUnmount() {
     document.removeEventListener('click', this.onDocClick)
@@ -570,6 +735,77 @@ export default {
         // still redirect
       } finally {
         window.location.href = '/login?redirect-to=/insurance_core'
+      }
+    },
+    toggleChat() {
+      this.chatOpen = !this.chatOpen
+      if (this.chatOpen) this.$nextTick(() => this.scrollChatToBottom())
+    },
+    onAvatarError() {
+      this.avatarFallback = true
+    },
+    scrollChatToBottom() {
+      const el = this.$refs.chatScroll
+      if (el) el.scrollTop = el.scrollHeight
+    },
+    sendSuggestion(text) {
+      this.chatInput = text
+      this.sendChat()
+    },
+    async sendChat() {
+      const text = (this.chatInput || '').trim()
+      if (!text || this.chatSending) return
+      this.chatInput = ''
+      this.chatMessages.push({ role: 'user', content: text })
+      this.chatSending = true
+      try {
+        const res = await fetch('/api/method/insurance_core.portal.portal_chat', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            'X-Frappe-CSRF-Token': window.csrf_token || '',
+          },
+          body: JSON.stringify({
+            message: text,
+            session_id: this.chatSessionId || undefined,
+          }),
+        })
+        const data = await res.json()
+        if (!res.ok || data.exc) {
+          const msg =
+            data._server_messages
+              ? JSON.parse(JSON.parse(data._server_messages)[0]).message
+              : data.message || data.exception || 'Something went wrong. Please try again.'
+          this.chatMessages.push({
+            role: 'assistant',
+            content: typeof msg === 'string' ? msg : 'Something went wrong. Please try again.',
+            error: true,
+          })
+          return
+        }
+        const payload = data.message || data
+        if (payload.session_id) {
+          this.chatSessionId = payload.session_id
+          try {
+            sessionStorage.setItem('insurance_portal_chat_session', payload.session_id)
+          } catch (e) {
+            /* ignore */
+          }
+        }
+        this.chatMessages.push({
+          role: 'assistant',
+          content: payload.reply || payload.output || 'No response.',
+        })
+      } catch (e) {
+        this.chatMessages.push({
+          role: 'assistant',
+          content: 'Network error. Please check your connection and try again.',
+          error: true,
+        })
+      } finally {
+        this.chatSending = false
       }
     },
   },
@@ -696,8 +932,38 @@ export default {
   .sidebar-icon,
   .sidebar-chevron,
   .sidebar-overlay-enter-active,
-  .sidebar-overlay-leave-active {
+  .sidebar-overlay-leave-active,
+  .chat-avatar {
     transition: none !important;
+    animation: none !important;
   }
+}
+
+/* Floating chatbot avatar */
+.chat-avatar {
+  animation: chat-avatar-pulse 3s ease-in-out infinite;
+}
+@keyframes chat-avatar-pulse {
+  0%,
+  100% {
+    box-shadow: 0 10px 25px -5px rgb(0 0 0 / 0.15);
+  }
+  50% {
+    box-shadow:
+      0 10px 25px -5px rgb(0 0 0 / 0.15),
+      0 0 0 6px rgb(99 102 241 / 0.15);
+  }
+}
+
+.chat-panel-enter-active,
+.chat-panel-leave-active {
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+}
+.chat-panel-enter-from,
+.chat-panel-leave-to {
+  opacity: 0;
+  transform: translateY(12px) scale(0.98);
 }
 </style>
