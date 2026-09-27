@@ -334,3 +334,213 @@ def portal_claim_print(claim, settlement=0):
 
 	key = "claim_settlement" if cint(settlement) else "Insurance Claim"
 	return get_print_html("Insurance Claim", claim, template_key=key)
+
+
+# ---------------------------------------------------------------------------
+# Portal chatbot (Frappe Flow agent + optional Knowledge Base)
+# ---------------------------------------------------------------------------
+
+PORTAL_CHAT_AGENT_TITLE = "Insurance Portal Assistant"
+PORTAL_CHAT_AGENT_INSTRUCTIONS = """You are a helpful insurance assistant for clients of this brokerage.
+Answer clearly and accurately about policies, coverages, claims process, documents needed, cashless vs reimbursement, and endorsements.
+Use the knowledge base when available. Do not invent policy numbers, claim statuses, or coverage limits.
+If the user asks about their specific policy or claim status and you cannot look it up, tell them to open Policies or Claims in the portal, or contact their agent.
+Be concise. Prefer bullet lists for document checklists. If unsure, say so and suggest next steps.
+Do not discuss internal commissions, reinsurance, or admin-only settings.
+"""
+
+
+def _resolve_portal_agent_name():
+	"""Return Flow Agent name for portal chat, or None if Flow is not installed / not configured."""
+	if not frappe.db.exists("DocType", "Flow Agent"):
+		return None
+
+	# Prefer an agent explicitly titled for the portal
+	name = frappe.db.get_value("Flow Agent", {"title": PORTAL_CHAT_AGENT_TITLE}, "name")
+	if name:
+		return name
+
+	# Fallback: any enabled agent (first by modified)
+	name = frappe.db.get_value(
+		"Flow Agent",
+		{"enabled": 1} if frappe.db.has_column("Flow Agent", "enabled") else {},
+		"name",
+		order_by="modified desc",
+	)
+	return name
+
+
+def _ensure_portal_agent():
+	"""Create a minimal Flow Agent for portal chat if none exists. Returns agent name or None."""
+	if not frappe.db.exists("DocType", "Flow Agent"):
+		return None
+
+	existing = _resolve_portal_agent_name()
+	if existing:
+		return existing
+
+	# Need at least one Flow Model
+	model = frappe.db.get_value("Flow Model", {"enabled": 1}, "name") if frappe.db.exists("DocType", "Flow Model") else None
+	if not model:
+		model = frappe.db.get_value("Flow Model", {}, "name") if frappe.db.exists("DocType", "Flow Model") else None
+	if not model:
+		return None
+
+	doc = frappe.get_doc(
+		{
+			"doctype": "Flow Agent",
+			"title": PORTAL_CHAT_AGENT_TITLE,
+			"instructions": PORTAL_CHAT_AGENT_INSTRUCTIONS,
+			"model": model,
+		}
+	)
+	# Optional fields vary by Flow version
+	if frappe.get_meta("Flow Agent").has_field("enabled"):
+		doc.enabled = 1
+	doc.insert(ignore_permissions=True)
+	frappe.db.commit()
+	return doc.name
+
+
+def _run_flow_chat(message: str, session_id: str | None = None) -> dict:
+	"""Run one turn against a Flow Agent. Returns {reply, session_id, agent}."""
+	agent_name = _ensure_portal_agent()
+	if not agent_name:
+		return {
+			"reply": (
+				"The assistant is not configured yet. Please ask a System Manager to install "
+				"the Flow app, add a Flow Provider + Model, and create a Flow Agent "
+				f"titled “{PORTAL_CHAT_AGENT_TITLE}” (with a Knowledge Base if desired)."
+			),
+			"session_id": session_id,
+			"agent": None,
+			"configured": False,
+		}
+
+	try:
+		from flow import Agent
+	except Exception:
+		# Older / alternate import path
+		try:
+			from flow.agent import Agent
+		except Exception as e:
+			frappe.log_error(title="portal_chat Flow import", message=str(e))
+			return {
+				"reply": "The AI assistant is temporarily unavailable (Flow library not loaded).",
+				"session_id": session_id,
+				"agent": agent_name,
+				"configured": False,
+			}
+
+	try:
+		agent = Agent(name=agent_name) if hasattr(Agent, "__init__") else None
+		# Prefer document-based session when Flow supports it
+		if session_id and frappe.db.exists("DocType", "Flow Session") and frappe.db.exists("Flow Session", session_id):
+			# Resume via Flow Session API if available
+			try:
+				from flow import session as flow_session_mod
+
+				sess = flow_session_mod.get(session_id) if hasattr(flow_session_mod, "get") else None
+				if sess and hasattr(sess, "chat"):
+					result = sess.chat(message)
+					reply = getattr(result, "output", None) or getattr(result, "reply", None) or str(result)
+					return {
+						"reply": reply,
+						"session_id": session_id,
+						"agent": agent_name,
+						"configured": True,
+					}
+			except Exception:
+				pass
+
+		# Code-first Agent API
+		agent_doc = frappe.get_doc("Flow Agent", agent_name)
+		model_id = agent_doc.get("model") or agent_doc.get("model_id")
+		instructions = agent_doc.get("instructions") or PORTAL_CHAT_AGENT_INSTRUCTIONS
+
+		if agent is None:
+			agent = Agent(model=model_id, instructions=instructions)
+
+		if hasattr(agent, "new_session") and not session_id:
+			sess = agent.new_session(title=f"Portal · {frappe.session.user}")
+			result = sess.chat(message)
+			new_sid = getattr(sess, "name", None) or getattr(sess, "id", None) or session_id
+			reply = getattr(result, "output", None) or getattr(result, "reply", None) or str(result)
+			return {
+				"reply": reply,
+				"session_id": new_sid,
+				"agent": agent_name,
+				"configured": True,
+			}
+
+		if hasattr(agent, "run"):
+			result = agent.run(message)
+			reply = getattr(result, "output", None) or getattr(result, "reply", None) or str(result)
+			return {
+				"reply": reply,
+				"session_id": session_id,
+				"agent": agent_name,
+				"configured": True,
+			}
+
+		# Last resort: call a common Flow API method if present
+		if frappe.get_attr("flow.api.chat"):
+			out = frappe.call("flow.api.chat", agent=agent_name, message=message, session=session_id)
+			return {
+				"reply": out.get("reply") or out.get("output") or str(out),
+				"session_id": out.get("session_id") or session_id,
+				"agent": agent_name,
+				"configured": True,
+			}
+
+		return {
+			"reply": "Flow is installed but the chat API shape is not recognized. Please update Flow or contact support.",
+			"session_id": session_id,
+			"agent": agent_name,
+			"configured": False,
+		}
+	except Exception as e:
+		frappe.log_error(title="portal_chat run", message=frappe.get_traceback())
+		return {
+			"reply": _("Sorry, I could not process that right now. Please try again in a moment."),
+			"session_id": session_id,
+			"agent": agent_name,
+			"configured": True,
+			"error": str(e),
+		}
+
+
+@frappe.whitelist(methods=["GET", "POST"])
+def portal_chat(message=None, session_id=None):
+	"""One turn of portal chatbot. Scoped to logged-in insurance client.
+
+	Args:
+	        message: user text
+	        session_id: optional Flow Session name to continue conversation
+
+	Returns:
+	        {reply, session_id, agent, configured}
+	"""
+	# Auth + client linkage (same as other portal APIs)
+	_current_client()
+
+	message = (message or frappe.form_dict.get("message") or "").strip()
+	if not message:
+		frappe.throw(_("Please enter a message."))
+
+	session_id = session_id or frappe.form_dict.get("session_id") or None
+	if session_id:
+		session_id = str(session_id).strip() or None
+
+	# Soft length guard
+	if len(message) > 4000:
+		frappe.throw(_("Message is too long. Please keep it under 4000 characters."))
+
+	return _run_flow_chat(message, session_id=session_id)
+
+
+@frappe.whitelist(methods=["GET", "POST"])
+def portal_chat_reset():
+	"""Clear server-side expectation of session; client should drop sessionStorage too."""
+	_current_client()
+	return {"ok": True}
