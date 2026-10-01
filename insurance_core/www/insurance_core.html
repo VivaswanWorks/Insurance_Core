@@ -12,16 +12,15 @@
     <div id="modals"></div>
     <div id="popovers"></div>
 
-    {# Real CSRF token injected by Frappe when serving this www page #}
+    {# csrf_token is set in www/insurance_core.py get_context #}
     <script>
-      window.csrf_token = "{{ csrf_token }}";
+      window.csrf_token = {{ csrf_token|tojson }};
       window.frappe = window.frappe || {};
       window.frappe.boot = window.frappe.boot || {};
       if (!window.frappe.boot.csrf_token) {
         window.frappe.boot.csrf_token = window.csrf_token;
       }
     </script>
-    {# Vite build (index.html entry) emits index.js — see yarn build log #}
     <script type="module" src="/assets/insurance_core/frontend/index.js"></script>
   </body>
 </html>
