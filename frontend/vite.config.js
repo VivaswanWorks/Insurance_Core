@@ -40,16 +40,20 @@ export default defineConfig(({ command }) => ({
     outDir,
     emptyOutDir: true,
     target: 'es2015',
+    // One stylesheet only — avoids multiple CSS chunks all named index.css
+    // (that overwrote the full Tailwind build with the tiny TipTap sheet).
+    cssCodeSplit: false,
     rollupOptions: {
       input: path.resolve(__dirname, 'index.html'),
       output: {
-        // Vite HTML entry is named "index" → index.js (www loads this)
         entryFileNames: 'index.js',
         chunkFileNames: '[name]-[hash].js',
         assetFileNames: (assetInfo) => {
-          if (assetInfo.name && assetInfo.name.endsWith('.css')) {
+          const name = assetInfo.name || ''
+          if (name.endsWith('.css')) {
             return 'index.css'
           }
+          // Fonts and other assets keep stable names
           return '[name][extname]'
         },
       },
