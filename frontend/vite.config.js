@@ -17,8 +17,13 @@ function loadProxy() {
   }
 }
 
+// Frappe serves apps/<app>/<python_pkg>/public/** as /assets/<app>/**
+// Repo layout: apps/insurance_core/frontend  →  apps/insurance_core/insurance_core/public/frontend
+const outDir = path.resolve(__dirname, '../insurance_core/public/frontend')
+
 export default defineConfig(({ command }) => ({
   plugins: [vue()],
+  // Production asset URL prefix (must match www/insurance_core.html script src)
   base: command === 'build' ? '/assets/insurance_core/frontend/' : '/',
   server: {
     host: true,
@@ -32,14 +37,22 @@ export default defineConfig(({ command }) => ({
     },
   },
   build: {
-    outDir: '../insurance_core/public/frontend',
+    outDir,
     emptyOutDir: true,
     target: 'es2015',
+    // Explicit entry so Rollup always emits main.js (not a hashed name)
     rollupOptions: {
+      input: path.resolve(__dirname, 'index.html'),
       output: {
-        entryFileNames: '[name].js',
-        chunkFileNames: '[name]-[hash].js',
-        assetFileNames: '[name].[ext]',
+        // Force stable names referenced by www/insurance_core.html
+        entryFileNames: 'main.js',
+        chunkFileNames: 'chunks/[name]-[hash].js',
+        assetFileNames: (assetInfo) => {
+          if (assetInfo.name && assetInfo.name.endsWith('.css')) {
+            return 'index.css'
+          }
+          return 'assets/[name][extname]'
+        },
       },
     },
   },
