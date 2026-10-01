@@ -139,21 +139,25 @@ CUSTOM_FIELDS = {
 }
 
 
-def ensure_custom_fields():
+def ensure_custom_fields(quiet: bool = False):
 	"""Create the fields listed above if they do not already exist."""
+	def log(msg: str):
+		if not quiet:
+			print(msg)
+
 	# Only create for DocTypes that actually exist on the site
 	fields_to_create = {}
 	for dt, fields in CUSTOM_FIELDS.items():
 		if frappe.db.exists("DocType", dt):
 			fields_to_create[dt] = fields
 		else:
-			print(f"  ⚠  DocType {dt} not found – skipping its fields")
+			log(f"  ⚠  DocType {dt} not found – skipping its fields")
 
 	if fields_to_create:
 		create_custom_fields(fields_to_create, update=True)
-		print("  ✓ Custom fields ensured on our DocTypes")
+		log("  ✓ Custom fields ensured on our DocTypes")
 	else:
-		print("  ⚠  No target DocTypes found – custom fields skipped")
+		log("  ⚠  No target DocTypes found – custom fields skipped")
 
 
 # ---------------------------------------------------------------------------
@@ -248,11 +252,15 @@ frappe.ui.form.on("Insurance RFQ Detail", {
 ]
 
 
-def ensure_client_scripts():
+def ensure_client_scripts(quiet: bool = False):
+	def log(msg: str):
+		if not quiet:
+			print(msg)
+
 	for cs in CLIENT_SCRIPTS:
 		# Client Script requires the target DocType to exist
 		if not frappe.db.exists("DocType", cs["dt"]):
-			print(f"  ⚠  DocType {cs['dt']} missing – Client Script '{cs['name']}' skipped")
+			log(f"  ⚠  DocType {cs['dt']} missing – Client Script '{cs['name']}' skipped")
 			continue
 
 		existing = frappe.db.get_value("Client Script", {"name": cs["name"]}, "name")
@@ -262,7 +270,7 @@ def ensure_client_scripts():
 			doc.script = cs["script"]
 			doc.enabled = cs["enabled"]
 			doc.save(ignore_permissions=True)
-			print(f"  ✓ Client Script updated: {cs['name']}")
+			log(f"  ✓ Client Script updated: {cs['name']}")
 		else:
 			doc = frappe.get_doc(
 				{
@@ -275,16 +283,25 @@ def ensure_client_scripts():
 				}
 			)
 			doc.insert(ignore_permissions=True)
-			print(f"  ✓ Client Script created: {cs['name']}")
+			log(f"  ✓ Client Script created: {cs['name']}")
 
 
 # ---------------------------------------------------------------------------
 # Sample Insurer RFQ Rules (only if none exist)
 # ---------------------------------------------------------------------------
 
-def seed_sample_rules():
+def seed_sample_rules(quiet: bool = False):
+	"""Seed a couple of sample Insurer RFQ Rules when Active providers exist.
+
+	Skipped silently when quiet=True and there are no providers (typical during
+	after_install before the interactive demo-data prompt).
+	"""
+	def log(msg: str):
+		if not quiet:
+			print(msg)
+
 	if frappe.db.count("Insurer RFQ Rule") > 0:
-		print("  ✓ Insurer RFQ Rules already present – sample seed skipped")
+		log("  ✓ Insurer RFQ Rules already present – sample seed skipped")
 		return
 
 	# Only seed if we have at least one Insurance Provider
@@ -295,7 +312,8 @@ def seed_sample_rules():
 		limit=5,
 	)
 	if not providers:
-		print("  ⚠  No active Insurance Providers – sample rules not created")
+		# Expected on fresh install before demo data — do not warn during hooks.
+		log("  ⚠  No active Insurance Providers – sample rules not created")
 		return
 
 	sample = [
@@ -329,7 +347,7 @@ def seed_sample_rules():
 			frappe.get_doc({"doctype": "Insurer RFQ Rule", **row}).insert(
 				ignore_permissions=True
 			)
-			print(f"  ✓ Sample rule created: {row['rule_name']}")
+			log(f"  ✓ Sample rule created: {row['rule_name']}")
 
 
 # ---------------------------------------------------------------------------
@@ -394,13 +412,15 @@ def print_checklist():
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def setup(force_seed_rules: bool = False, quiet: bool = False):
+def setup(force_seed_rules: bool = False, quiet: bool = False, seed_rules: bool = True):
 	"""
 	Main installer. Safe to run multiple times (idempotent).
 
 	:param force_seed_rules: if True, always try to create sample rules
 	:param quiet: if True (used from after_install/after_migrate), skip
-	              verbose checklist and hooks reminder
+	              verbose checklist and hooks reminder; mute seed warnings
+	:param seed_rules: if False, skip sample Insurer RFQ Rule seeding entirely
+	                   (hooks path: providers do not exist until demo data)
 	"""
 	def log(msg: str):
 		if not quiet:
@@ -410,18 +430,19 @@ def setup(force_seed_rules: bool = False, quiet: bool = False):
 
 	# 1. Fields on our DocTypes
 	log("• Custom fields")
-	ensure_custom_fields()
+	ensure_custom_fields(quiet=quiet)
 
 	# 2. Client Scripts
 	log("• Client Scripts")
-	ensure_client_scripts()
+	ensure_client_scripts(quiet=quiet)
 
-	# 3. Sample rules
-	log("• Sample Insurer RFQ Rules")
-	if force_seed_rules or frappe.db.count("Insurer RFQ Rule") == 0:
-		seed_sample_rules()
-	else:
-		log("  ✓ Rules already exist")
+	# 3. Sample rules (needs Active Insurance Providers — usually from demo data)
+	if seed_rules:
+		log("• Sample Insurer RFQ Rules")
+		if force_seed_rules or frappe.db.count("Insurer RFQ Rule") == 0:
+			seed_sample_rules(quiet=quiet)
+		else:
+			log("  ✓ Rules already exist")
 
 	# 4. Reminders only when run manually
 	if not quiet:
@@ -434,8 +455,13 @@ def setup(force_seed_rules: bool = False, quiet: bool = False):
 
 # Called from install.py after_install / after_migrate
 def setup_for_hooks():
-	"""Quiet entry-point for automatic install on a new site."""
-	setup(quiet=True)
+	"""Quiet structural setup only — no sample-rule seeding.
+
+	Sample Insurer RFQ Rules require Active Insurance Providers. Those are created
+	by demo_data (prompted after this) or manually. Seeding here only produced
+	"No active Insurance Providers" noise before the demo-data confirmation.
+	"""
+	setup(quiet=True, seed_rules=False)
 
 
 # Allow: bench execute …setup  (verbose, for manual runs)
