@@ -211,8 +211,12 @@ def _seed_engineering_schemes() -> int:
 	return created
 
 
-def setup(seed_schemes: bool = True):
-	"""Main entry: extend LOB options + optionally seed schemes."""
+def setup(seed_schemes: bool = True, quiet: bool = False):
+	"""Main entry: extend LOB options + optionally seed schemes.
+
+	:param seed_schemes: if True, create Engineering schemes when providers exist
+	:param quiet: if True (after_install/after_migrate), suppress console output
+	"""
 	changed = []
 	for dt in DOCTYPES_WITH_LOB:
 		if frappe.db.exists("DocType", dt) and _ensure_option(dt):
@@ -228,5 +232,6 @@ def setup(seed_schemes: bool = True):
 		f"Engineering vertical ready. Updated LOB options on: {', '.join(changed) or 'already present'}. "
 		f"Seeded {created} Engineering scheme(s)."
 	)
-	print(msg)
+	if not quiet:
+		print(msg)
 	return {"updated": changed, "schemes_created": created, "message": msg}

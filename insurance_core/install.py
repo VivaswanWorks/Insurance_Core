@@ -101,15 +101,20 @@ def setup_rfq_extension():
 
 
 def setup_engineering_vertical():
-	"""Ensure Engineering LOB is on Select options + optional sample schemes.
+	"""Ensure Engineering LOB is on Select options (structural only).
 
 	Source JSON already lists Engineering; this forces Property Setter / DocField
 	updates on existing sites where migrate alone does not refresh Select options.
+
+	Do NOT seed Engineering schemes here — that needs Insurance Providers, which
+	only exist after demo data (or manual provider create). Scheme seeding runs
+	inside demo_data.install_demo_data / add_engineering_vertical with seed_schemes=True.
 	"""
 	try:
 		from insurance_core.add_engineering_vertical import setup as eng_setup
-		# seed_schemes=True is idempotent; only inserts if demo providers exist
-		eng_setup(seed_schemes=True)
+		# Hooks path: LOB options only. Avoid "Seeded 0 …" / provider warnings
+		# before the interactive demo-data prompt.
+		eng_setup(seed_schemes=False, quiet=True)
 	except Exception as e:
 		try:
 			frappe.logger("insurance_core").warning(f"Engineering vertical setup skipped: {e}")
