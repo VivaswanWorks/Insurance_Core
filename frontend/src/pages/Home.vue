@@ -14,10 +14,8 @@
       </div>
     </header>
 
-    <div v-if="$resources.dashboard.loading" class="text-gray-500">Loading…</div>
-    <div v-else-if="$resources.dashboard.error" class="text-red-600 text-sm">
-      {{ $resources.dashboard.error }}
-    </div>
+    <div v-if="loading" class="text-gray-500">Loading…</div>
+    <div v-else-if="error" class="text-red-600 text-sm">{{ error }}</div>
     <template v-else-if="dashboard">
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div class="rounded-lg border bg-white p-4 shadow-sm">
@@ -80,17 +78,62 @@
 </template>
 
 <script>
+/**
+ * Dashboard uses GET (no CSRF) against portal_dashboard which is
+ * @frappe.whitelist(methods=["GET", "POST"]).
+ * Avoids CSRFTokenError when window.csrf_token is missing / placeholder.
+ */
 export default {
   name: 'Home',
-  computed: {
-    dashboard() {
-      return this.$resources.dashboard.data
-    },
+  data() {
+    return {
+      dashboard: null,
+      loading: true,
+      error: null,
+    }
   },
-  resources: {
-    dashboard: {
-      url: 'insurance_core.portal.portal_dashboard',
-      auto: true,
+  async mounted() {
+    await this.loadDashboard()
+  },
+  methods: {
+    async loadDashboard() {
+      this.loading = true
+      this.error = null
+      try {
+        const res = await fetch('/api/method/insurance_core.portal.portal_dashboard', {
+          method: 'GET',
+          credentials: 'same-origin',
+          headers: {
+            Accept: 'application/json',
+            // Harmless if missing; GET does not require CSRF
+            'X-Frappe-CSRF-Token': window.csrf_token || '',
+          },
+        })
+        const data = await res.json()
+        if (!res.ok || data.exc) {
+          let msg = 'Failed to load dashboard'
+          try {
+            if (data._server_messages) {
+              msg = JSON.parse(JSON.parse(data._server_messages)[0]).message || msg
+            } else if (data.exception) {
+              msg = String(data.exception).split('\n')[0]
+            } else if (data.message) {
+              msg = typeof data.message === 'string' ? data.message : msg
+            }
+          } catch (e) {
+            /* ignore parse errors */
+          }
+          this.error = msg
+          this.dashboard = null
+          return
+        }
+        this.dashboard = data.message
+      } catch (e) {
+        this.error = e?.message || String(e)
+        this.dashboard = null
+      } finally {
+        this.loading = false
+      }
     },
   },
 }
