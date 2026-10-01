@@ -21,6 +21,7 @@
         window.frappe.boot.csrf_token = window.csrf_token;
       }
     </script>
-    <script type="module" src="/assets/insurance_core/frontend/main.js"></script>
+    {# Vite build (index.html entry) emits index.js — see yarn build log #}
+    <script type="module" src="/assets/insurance_core/frontend/index.js"></script>
   </body>
 </html>
