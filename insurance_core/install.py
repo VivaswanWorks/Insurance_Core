@@ -152,35 +152,43 @@ DASHBOARD_CHARTS = [
 ]
 
 # Left sidebar (v15/v16 Workspace Sidebar).
-# Home + Dashboard workspaces sit at the top; module groups follow (portal parity).
-# type: Section Break | Link | Spacer
-# link_type: DocType | Page | Report | Workspace | URL
+# Desk nesting rule (ERPNext selling.json / Workspace Sidebar Item):
+#   - top-level Links (Home, Dashboard): child=0
+#   - Section Break: child=0, collapsible=1, indent=1
+#   - Links under a Section Break: child=1  ← required or Desk flattens the list
+# type: Section Break | Link | Spacer | Sidebar Item Group
+# link_type: DocType | Page | Report | Workspace | Dashboard | URL
 WORKSPACE_SIDEBAR_ITEMS = [
-	# Top: dedicated workspaces
-	{"type": "Link", "label": "Home", "link_type": "Workspace", "link_to": "Insurance Home", "icon": "home"},
-	{"type": "Link", "label": "Dashboard", "link_type": "Workspace", "link_to": "Insurance Dashboard", "icon": "dashboard"},
-	{"type": "Section Break", "label": "Catalog"},
-	{"type": "Link", "label": "Insurance Providers", "link_type": "DocType", "link_to": "Insurance Provider", "icon": "organization"},
-	{"type": "Link", "label": "Insurance Schemes", "link_type": "DocType", "link_to": "Insurance Scheme", "icon": "file"},
-	{"type": "Section Break", "label": "Policies"},
-	{"type": "Link", "label": "Policies", "link_type": "DocType", "link_to": "Insurance Policy", "icon": "file-text"},
-	{"type": "Link", "label": "Clients", "link_type": "DocType", "link_to": "Insurance Client", "icon": "users"},
-	{"type": "Link", "label": "Agents", "link_type": "DocType", "link_to": "Insurance Agent", "icon": "user"},
-	{"type": "Link", "label": "Quotations", "link_type": "DocType", "link_to": "Insurance Quotation", "icon": "file"},
-	{"type": "Link", "label": "Opportunities", "link_type": "DocType", "link_to": "Insurance Opportunity", "icon": "opportunity"},
-	{"type": "Link", "label": "Endorsements", "link_type": "DocType", "link_to": "Policy Endorsement", "icon": "edit"},
-	{"type": "Section Break", "label": "Claims"},
-	{"type": "Link", "label": "Claims", "link_type": "DocType", "link_to": "Insurance Claim", "icon": "file"},
-	{"type": "Link", "label": "Cashless Auth", "link_type": "DocType", "link_to": "Cashless Authorization", "icon": "quality"},
-	{"type": "Link", "label": "Network Hospitals", "link_type": "DocType", "link_to": "Network Hospital", "icon": "healthcare"},
-	{"type": "Link", "label": "Claim Recoveries", "link_type": "DocType", "link_to": "Claim Recovery", "icon": "income"},
-	{"type": "Section Break", "label": "Operations"},
-	{"type": "Link", "label": "Communications", "link_type": "DocType", "link_to": "Insurance Communication", "icon": "mail"},
-	{"type": "Link", "label": "Grievances", "link_type": "DocType", "link_to": "Insurance Grievance", "icon": "message-circle"},
-	{"type": "Link", "label": "Compliance", "link_type": "DocType", "link_to": "Compliance Record", "icon": "shield"},
-	{"type": "Link", "label": "Commissions", "link_type": "DocType", "link_to": "Commission Payout", "icon": "money-coins-1"},
-	{"type": "Section Break", "label": "System"},
-	{"type": "Link", "label": "Settings", "link_type": "DocType", "link_to": "Insurance Settings", "icon": "setting"},
+	# Top-level workspaces (not nested)
+	{"type": "Link", "label": "Home", "link_type": "Workspace", "link_to": "Insurance Home", "icon": "home", "child": 0},
+	{"type": "Link", "label": "Dashboard", "link_type": "Workspace", "link_to": "Insurance Dashboard", "icon": "dashboard", "child": 0},
+	# Catalog
+	{"type": "Section Break", "label": "Catalog", "icon": "organization", "child": 0, "collapsible": 1, "indent": 1, "keep_closed": 0},
+	{"type": "Link", "label": "Insurance Providers", "link_type": "DocType", "link_to": "Insurance Provider", "icon": "organization", "child": 1},
+	{"type": "Link", "label": "Insurance Schemes", "link_type": "DocType", "link_to": "Insurance Scheme", "icon": "file", "child": 1},
+	# Policies
+	{"type": "Section Break", "label": "Policies", "icon": "file-text", "child": 0, "collapsible": 1, "indent": 1, "keep_closed": 0},
+	{"type": "Link", "label": "Policies", "link_type": "DocType", "link_to": "Insurance Policy", "icon": "file-text", "child": 1},
+	{"type": "Link", "label": "Clients", "link_type": "DocType", "link_to": "Insurance Client", "icon": "users", "child": 1},
+	{"type": "Link", "label": "Agents", "link_type": "DocType", "link_to": "Insurance Agent", "icon": "user", "child": 1},
+	{"type": "Link", "label": "Quotations", "link_type": "DocType", "link_to": "Insurance Quotation", "icon": "file", "child": 1},
+	{"type": "Link", "label": "Opportunities", "link_type": "DocType", "link_to": "Insurance Opportunity", "icon": "opportunity", "child": 1},
+	{"type": "Link", "label": "Endorsements", "link_type": "DocType", "link_to": "Policy Endorsement", "icon": "edit", "child": 1},
+	# Claims
+	{"type": "Section Break", "label": "Claims", "icon": "file", "child": 0, "collapsible": 1, "indent": 1, "keep_closed": 0},
+	{"type": "Link", "label": "Claims", "link_type": "DocType", "link_to": "Insurance Claim", "icon": "file", "child": 1},
+	{"type": "Link", "label": "Cashless Auth", "link_type": "DocType", "link_to": "Cashless Authorization", "icon": "quality", "child": 1},
+	{"type": "Link", "label": "Network Hospitals", "link_type": "DocType", "link_to": "Network Hospital", "icon": "healthcare", "child": 1},
+	{"type": "Link", "label": "Claim Recoveries", "link_type": "DocType", "link_to": "Claim Recovery", "icon": "income", "child": 1},
+	# Operations
+	{"type": "Section Break", "label": "Operations", "icon": "tool", "child": 0, "collapsible": 1, "indent": 1, "keep_closed": 0},
+	{"type": "Link", "label": "Communications", "link_type": "DocType", "link_to": "Insurance Communication", "icon": "mail", "child": 1},
+	{"type": "Link", "label": "Grievances", "link_type": "DocType", "link_to": "Insurance Grievance", "icon": "message-circle", "child": 1},
+	{"type": "Link", "label": "Compliance", "link_type": "DocType", "link_to": "Compliance Record", "icon": "shield", "child": 1},
+	{"type": "Link", "label": "Commissions", "link_type": "DocType", "link_to": "Commission Payout", "icon": "money-coins-1", "child": 1},
+	# System
+	{"type": "Section Break", "label": "System", "icon": "setting", "child": 0, "collapsible": 1, "indent": 1, "keep_closed": 0},
+	{"type": "Link", "label": "Settings", "link_type": "DocType", "link_to": "Insurance Settings", "icon": "setting", "child": 1},
 	# Reinsurance Treaty intentionally omitted from default broker sidebar.
 	# DocType + claim cession recovery remain available via Awesome Bar / search.
 ]
@@ -990,8 +998,14 @@ def ensure_workspace_sidebar():
 			row["link_to"] = link_to
 		if "icon" in item_fields and spec.get("icon"):
 			row["icon"] = spec["icon"]
+		# Nesting / section display (v15/v16 Workspace Sidebar Item)
+		# child=1 under a Section Break is required for Desk to group items.
+		for flag in ("child", "collapsible", "indent", "keep_closed", "show_arrow"):
+			if flag in item_fields and flag in spec:
+				row[flag] = 1 if spec[flag] else 0
 		# Only pass fields that exist on this Frappe version
-		return {k: v for k, v in row.items() if k in item_fields or k in ("type", "label", "link_type", "link_to")}
+		allowed = item_fields | {"type", "label", "link_type", "link_to"}
+		return {k: v for k, v in row.items() if k in allowed}
 
 	items = []
 	for spec in WORKSPACE_SIDEBAR_ITEMS:
@@ -999,7 +1013,7 @@ def ensure_workspace_sidebar():
 		if row:
 			items.append(row)
 
-	# Drop section breaks that would be empty
+	# Drop section breaks that would be empty (no following child Links)
 	filtered = []
 	for i, row in enumerate(items):
 		if row.get("type") == "Section Break":
@@ -1007,8 +1021,10 @@ def ensure_workspace_sidebar():
 			for r in items[i + 1 :]:
 				if r.get("type") == "Section Break":
 					break
-				has_child = True
-				break
+				# Prefer explicit child=1; fall back to any non-section row
+				if r.get("child") or r.get("type") == "Link":
+					has_child = True
+					break
 			if not has_child:
 				continue
 		filtered.append(row)
