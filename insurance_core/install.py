@@ -14,17 +14,23 @@ ROLES = [
 	"Insurance User",
 ]
 
-# DocTypes to surface on the Insurance Core workspace (must exist to be linked).
+# DocTypes to surface as shortcuts on the Home workspace (top-level only; no child tables).
 WORKSPACE_SHORTCUTS = [
 	("Insurance Policy", "DocType"),
 	("Insurance Claim", "DocType"),
 	("Insurance Client", "DocType"),
 	("Insurance Scheme", "DocType"),
 	("Insurance Agent", "DocType"),
+	("Insurance Opportunity", "DocType"),
+	("Insurance Quotation", "DocType"),
+	("Policy Endorsement", "DocType"),
+	("Cashless Authorization", "DocType"),
+	("Commission Payout", "DocType"),
 	("Insurance Settings", "DocType"),
 ]
 
-# Workspace (desk home page cards) — groups mirror portal left sidebar.
+# Home workspace link cards — top-level DocTypes only, segregated by section.
+# (Child tables / nested docs are intentionally excluded.)
 WORKSPACE_LINKS = [
 	# Catalog
 	{"type": "Card Break", "label": "Catalog"},
@@ -55,10 +61,104 @@ WORKSPACE_LINKS = [
 	{"type": "Link", "label": "Settings", "link_type": "DocType", "link_to": "Insurance Settings"},
 ]
 
-# Left sidebar (v15/v16 Workspace Sidebar) — same groups/order as portal App.vue navGroups.
+# Number Cards seeded for the Dashboard workspace (DocType count KPIs).
+# Filters use JSON string form expected by Number Card.
+DASHBOARD_NUMBER_CARDS = [
+	{
+		"name": "IC Active Policies",
+		"label": "Active Policies",
+		"document_type": "Insurance Policy",
+		"function": "Count",
+		"filters_json": '[["Insurance Policy","status","=","Active"]]',
+		"color": "#2490ef",
+	},
+	{
+		"name": "IC Open Claims",
+		"label": "Open Claims",
+		"document_type": "Insurance Claim",
+		"function": "Count",
+		"filters_json": '[["Insurance Claim","status","not in",["Settled","Rejected","Closed","Cancelled"]]]',
+		"color": "#e24c4c",
+	},
+	{
+		"name": "IC Total Clients",
+		"label": "Clients",
+		"document_type": "Insurance Client",
+		"function": "Count",
+		"filters_json": "[]",
+		"color": "#28a745",
+	},
+	{
+		"name": "IC Open Opportunities",
+		"label": "Open Opportunities",
+		"document_type": "Insurance Opportunity",
+		"function": "Count",
+		"filters_json": '[["Insurance Opportunity","status","not in",["Won","Lost","Closed","Cancelled"]]]',
+		"color": "#f6c343",
+	},
+	{
+		"name": "IC Pending Endorsements",
+		"label": "Pending Endorsements",
+		"document_type": "Policy Endorsement",
+		"function": "Count",
+		"filters_json": '[["Policy Endorsement","status","in",["Draft","Submitted","Approved"]]]',
+		"color": "#7c5cbf",
+	},
+	{
+		"name": "IC Cashless Pending",
+		"label": "Cashless Pending",
+		"document_type": "Cashless Authorization",
+		"function": "Count",
+		"filters_json": '[["Cashless Authorization","status","in",["Requested","Under Review","Query"]]]',
+		"color": "#17a2b8",
+	},
+]
+
+# Dashboard Charts seeded for the Dashboard workspace (simple Count-by-field).
+DASHBOARD_CHARTS = [
+	{
+		"name": "IC Claims by Status",
+		"chart_name": "IC Claims by Status",
+		"chart_type": "Group By",
+		"document_type": "Insurance Claim",
+		"group_by_type": "Count",
+		"group_by_based_on": "status",
+		"number_of_groups": 8,
+		"type": "Donut",
+		"is_public": 1,
+	},
+	{
+		"name": "IC Policies by Status",
+		"chart_name": "IC Policies by Status",
+		"chart_type": "Group By",
+		"document_type": "Insurance Policy",
+		"group_by_type": "Count",
+		"group_by_based_on": "status",
+		"number_of_groups": 8,
+		"type": "Bar",
+		"is_public": 1,
+	},
+	{
+		"name": "IC Opportunities by Status",
+		"chart_name": "IC Opportunities by Status",
+		"chart_type": "Group By",
+		"document_type": "Insurance Opportunity",
+		"group_by_type": "Count",
+		"group_by_based_on": "status",
+		"number_of_groups": 8,
+		"type": "Pie",
+		"is_public": 1,
+	},
+]
+
+# Left sidebar (v15/v16 Workspace Sidebar).
+# Home + Dashboard workspaces sit at the top; module groups follow (portal parity).
 # type: Section Break | Link | Spacer
 # link_type: DocType | Page | Report | Workspace | URL
 WORKSPACE_SIDEBAR_ITEMS = [
+	# Top: dedicated workspaces
+	{"type": "Link", "label": "Home", "link_type": "Workspace", "link_to": "Insurance Home", "icon": "home"},
+	{"type": "Link", "label": "Dashboard", "link_type": "Workspace", "link_to": "Insurance Dashboard", "icon": "dashboard"},
 	{"type": "Section Break", "label": "Catalog"},
 	{"type": "Link", "label": "Insurance Providers", "link_type": "DocType", "link_to": "Insurance Provider", "icon": "organization"},
 	{"type": "Link", "label": "Insurance Schemes", "link_type": "DocType", "link_to": "Insurance Scheme", "icon": "file"},
@@ -178,6 +278,9 @@ def after_install():
 	ensure_admin_privileges()
 	ensure_module()
 	ensure_workspace()
+	ensure_home_workspace()
+	ensure_dashboard_artifacts()
+	ensure_dashboard_workspace()
 	ensure_workspace_sidebar()
 	ensure_desktop_icon()
 	seed_eligibility_criteria()
@@ -196,6 +299,9 @@ def after_migrate():
 	ensure_admin_privileges()
 	ensure_module()
 	ensure_workspace()
+	ensure_home_workspace()
+	ensure_dashboard_artifacts()
+	ensure_dashboard_workspace()
 	ensure_workspace_sidebar()
 	ensure_desktop_icon()
 	seed_eligibility_criteria()
@@ -493,8 +599,12 @@ def _doctype_exists(name: str) -> bool:
 	return bool(frappe.db.exists("DocType", name))
 
 
-def _workspace_links_and_shortcuts():
-	"""Build Workspace links / shortcuts from doctypes that exist on this site."""
+def _workspace_exists(name: str) -> bool:
+	return bool(frappe.db.exists("Workspace", name))
+
+
+def _workspace_links_and_shortcuts(max_shortcuts: int = 12):
+	"""Build Workspace links / shortcuts from top-level doctypes that exist on this site."""
 	links = []
 	for row in WORKSPACE_LINKS:
 		if row["type"] == "Link" and not _doctype_exists(row["link_to"]):
@@ -545,85 +655,313 @@ def _workspace_links_and_shortcuts():
 			"type": "header",
 			"data": {"text": '<span class="h4"><b>Shortcuts</b></span>', "col": 12},
 		})
-		for i, s in enumerate(shortcuts[:6]):
+		for i, s in enumerate(shortcuts[:max_shortcuts]):
 			content_blocks.append({
 				"id": f"ic_sc_{i}",
 				"type": "shortcut",
 				"data": {"shortcut_name": s["label"], "col": 3},
 			})
+	# Card layout for sectioned links
+	if links:
+		content_blocks.append({
+			"id": "ic_hdr_links",
+			"type": "header",
+			"data": {"text": '<span class="h4"><b>Modules</b></span>', "col": 12},
+		})
+		card_idx = 0
+		for row in links:
+			if row["type"] == "Card Break":
+				content_blocks.append({
+					"id": f"ic_card_{card_idx}",
+					"type": "card",
+					"data": {"card_name": row["label"], "col": 4},
+				})
+				card_idx += 1
 	return links, shortcuts, content_blocks
 
 
-def ensure_workspace():
-	"""Create or repair a public Workspace so Insurance Core appears on the Desk.
+def _upsert_workspace(
+	name: str,
+	*,
+	icon: str,
+	title: str | None = None,
+	links=None,
+	shortcuts=None,
+	content_blocks=None,
+	charts=None,
+	number_cards=None,
+	sequence_id: float | None = None,
+):
+	"""Insert or fully refresh a public Insurance Core workspace (idempotent)."""
+	if not frappe.db.exists("DocType", "Workspace"):
+		return
 
-	Modern Frappe (v14+) shows modules via Workspace, not Module Def alone.
-	- Inserts when missing
-	- If present but hidden / not public, forces public + visible (does not wipe custom links)
+	title = title or name
+	payload = {
+		"doctype": "Workspace",
+		"label": name,
+		"title": title,
+		"module": "Insurance Core",
+		"public": 1,
+		"is_hidden": 0,
+		"icon": icon,
+		"content": json.dumps(content_blocks or []),
+		"links": links or [],
+		"shortcuts": shortcuts or [],
+	}
+	if charts is not None:
+		payload["charts"] = charts
+	if number_cards is not None:
+		payload["number_cards"] = number_cards
+	if sequence_id is not None:
+		payload["sequence_id"] = sequence_id
+
+	ws_meta_fields = {df.fieldname for df in frappe.get_meta("Workspace").fields}
+	if "standard" in ws_meta_fields:
+		payload["standard"] = 0
+	if "type" in ws_meta_fields:
+		payload["type"] = "Workspace"
+
+	try:
+		if frappe.db.exists("Workspace", name):
+			ws = frappe.get_doc("Workspace", name)
+			ws.title = title
+			ws.module = "Insurance Core"
+			ws.public = 1
+			ws.is_hidden = 0
+			ws.icon = icon
+			ws.content = json.dumps(content_blocks or [])
+			ws.set("links", [])
+			for row in links or []:
+				ws.append("links", row)
+			ws.set("shortcuts", [])
+			for row in shortcuts or []:
+				ws.append("shortcuts", row)
+			if charts is not None and "charts" in ws_meta_fields:
+				ws.set("charts", [])
+				for row in charts:
+					ws.append("charts", row)
+			if number_cards is not None and "number_cards" in ws_meta_fields:
+				ws.set("number_cards", [])
+				for row in number_cards:
+					ws.append("number_cards", row)
+			if sequence_id is not None and "sequence_id" in ws_meta_fields:
+				ws.sequence_id = sequence_id
+			ws.save(ignore_permissions=True)
+		else:
+			doc = frappe.get_doc(payload)
+			doc.insert(ignore_permissions=True)
+		frappe.db.commit()  # nosemgrep
+	except Exception as e:
+		try:
+			frappe.logger("insurance_core").warning(f"Workspace upsert skipped ({name}): {e}")
+		except Exception:
+			pass
+
+
+def ensure_workspace():
+	"""Create or repair the module Workspace (Insurance Core).
+
+	Kept for Desktop Icon / module discovery. Primary navigation is now
+	Insurance Home + Insurance Dashboard + sectioned sidebar links.
 	"""
 	if not frappe.db.exists("DocType", "Workspace"):
 		return
 
-	links, shortcuts, content_blocks = _workspace_links_and_shortcuts()
-	name = "Insurance Core"
+	links, shortcuts, content_blocks = _workspace_links_and_shortcuts(max_shortcuts=6)
+	_upsert_workspace(
+		"Insurance Core",
+		icon="shield",
+		links=links,
+		shortcuts=shortcuts,
+		content_blocks=content_blocks,
+		sequence_id=3.0,
+	)
 
-	if frappe.db.exists("Workspace", name):
-		# Repair visibility only — keep user customisations of links/content
-		try:
-			ws = frappe.get_doc("Workspace", name)
-			changed = False
-			if hasattr(ws, "is_hidden") and ws.is_hidden:
-				ws.is_hidden = 0
-				changed = True
-			if hasattr(ws, "public") and not ws.public:
-				ws.public = 1
-				changed = True
-			if hasattr(ws, "module") and not ws.module:
-				ws.module = "Insurance Core"
-				changed = True
-			if hasattr(ws, "icon") and not ws.icon:
-				ws.icon = "shield"
-				changed = True
-			if changed:
-				ws.save(ignore_permissions=True)
-				frappe.db.commit()  # nosemgrep
-		except Exception as e:
-			try:
-				frappe.logger("insurance_core").warning(f"Workspace repair skipped: {e}")
-			except Exception:
-				pass
+
+def ensure_home_workspace():
+	"""Public Home workspace: shortcuts + sectioned top-level DocType cards.
+
+	Pinned at the top of the Insurance Core left sidebar. Excludes child tables.
+	"""
+	if not frappe.db.exists("DocType", "Workspace"):
 		return
 
-	doc = frappe.get_doc({
-		"doctype": "Workspace",
-		"label": name,
-		"title": name,
-		"module": "Insurance Core",
-		"public": 1,
-		"is_hidden": 0,
-		"icon": "shield",
-		"content": json.dumps(content_blocks),
-		"links": links,
-		"shortcuts": shortcuts,
-	})
-	if "standard" in [df.fieldname for df in frappe.get_meta("Workspace").fields]:
-		doc.standard = 0
-	try:
-		doc.insert(ignore_permissions=True)
-		frappe.db.commit()  # nosemgrep
-	except Exception as e:
-		try:
-			frappe.logger("insurance_core").warning(f"Workspace insert skipped: {e}")
-		except Exception:
-			pass
+	links, shortcuts, content_blocks = _workspace_links_and_shortcuts(max_shortcuts=12)
+	_upsert_workspace(
+		"Insurance Home",
+		title="Home",
+		icon="home",
+		links=links,
+		shortcuts=shortcuts,
+		content_blocks=content_blocks,
+		sequence_id=1.0,
+	)
+
+
+def ensure_dashboard_artifacts():
+	"""Seed Number Cards and Dashboard Charts used by the Dashboard workspace."""
+	# --- Number Cards ---
+	if frappe.db.exists("DocType", "Number Card"):
+		nc_fields = {df.fieldname for df in frappe.get_meta("Number Card").fields}
+		for spec in DASHBOARD_NUMBER_CARDS:
+			dt = spec["document_type"]
+			if not _doctype_exists(dt):
+				continue
+			try:
+				if frappe.db.exists("Number Card", spec["name"]):
+					continue
+				payload = {
+					"doctype": "Number Card",
+					"name": spec["name"],
+					"label": spec["label"],
+					"document_type": dt,
+					"function": spec.get("function", "Count"),
+					"is_public": 1,
+					"is_standard": 0,
+					"module": "Insurance Core",
+				}
+				if "filters_json" in nc_fields:
+					payload["filters_json"] = spec.get("filters_json") or "[]"
+				if "color" in nc_fields and spec.get("color"):
+					payload["color"] = spec["color"]
+				if "type" in nc_fields:
+					payload["type"] = "Document Type"
+				# Strip unknown fields
+				payload = {k: v for k, v in payload.items() if k in nc_fields or k in ("doctype", "name")}
+				doc = frappe.get_doc(payload)
+				doc.insert(ignore_permissions=True)
+				frappe.db.commit()  # nosemgrep
+			except Exception as e:
+				try:
+					frappe.logger("insurance_core").warning(
+						f"Number Card seed skipped ({spec['name']}): {e}"
+					)
+				except Exception:
+					pass
+
+	# --- Dashboard Charts ---
+	if frappe.db.exists("DocType", "Dashboard Chart"):
+		ch_fields = {df.fieldname for df in frappe.get_meta("Dashboard Chart").fields}
+		for spec in DASHBOARD_CHARTS:
+			dt = spec["document_type"]
+			if not _doctype_exists(dt):
+				continue
+			try:
+				if frappe.db.exists("Dashboard Chart", spec["name"]):
+					continue
+				payload = {
+					"doctype": "Dashboard Chart",
+					"name": spec["name"],
+					"chart_name": spec.get("chart_name") or spec["name"],
+					"chart_type": spec.get("chart_type", "Group By"),
+					"document_type": dt,
+					"group_by_type": spec.get("group_by_type", "Count"),
+					"group_by_based_on": spec.get("group_by_based_on", "status"),
+					"number_of_groups": spec.get("number_of_groups", 8),
+					"type": spec.get("type", "Bar"),
+					"is_public": 1,
+					"is_standard": 0,
+					"module": "Insurance Core",
+					"timeseries": 0,
+				}
+				payload = {k: v for k, v in payload.items() if k in ch_fields or k in ("doctype", "name")}
+				doc = frappe.get_doc(payload)
+				doc.insert(ignore_permissions=True)
+				frappe.db.commit()  # nosemgrep
+			except Exception as e:
+				try:
+					frappe.logger("insurance_core").warning(
+						f"Dashboard Chart seed skipped ({spec['name']}): {e}"
+					)
+				except Exception:
+					pass
+
+
+def ensure_dashboard_workspace():
+	"""Public Dashboard workspace: number cards + charts for high-level stats.
+
+	Pinned second in the Insurance Core left sidebar.
+	"""
+	if not frappe.db.exists("DocType", "Workspace"):
+		return
+
+	number_cards = []
+	for spec in DASHBOARD_NUMBER_CARDS:
+		if frappe.db.exists("Number Card", spec["name"]):
+			number_cards.append({
+				"label": spec["label"],
+				"number_card_name": spec["name"],
+			})
+
+	charts = []
+	for spec in DASHBOARD_CHARTS:
+		if frappe.db.exists("Dashboard Chart", spec["name"]):
+			charts.append({
+				"label": spec.get("chart_name") or spec["name"],
+				"chart_name": spec["name"],
+			})
+
+	content_blocks = []
+	if number_cards:
+		content_blocks.append({
+			"id": "ic_dash_hdr_kpis",
+			"type": "header",
+			"data": {"text": '<span class="h4"><b>Key Metrics</b></span>', "col": 12},
+		})
+		for i, nc in enumerate(number_cards):
+			content_blocks.append({
+				"id": f"ic_dash_nc_{i}",
+				"type": "number_card",
+				"data": {"number_card_name": nc["number_card_name"], "col": 4},
+			})
+	if charts:
+		content_blocks.append({
+			"id": "ic_dash_hdr_charts",
+			"type": "header",
+			"data": {"text": '<span class="h4"><b>Analytics</b></span>', "col": 12},
+		})
+		for i, ch in enumerate(charts):
+			content_blocks.append({
+				"id": f"ic_dash_ch_{i}",
+				"type": "chart",
+				"data": {"chart_name": ch["chart_name"], "col": 6 if len(charts) > 1 else 12},
+			})
+
+	# Fallback header when no cards/charts could be seeded (missing DocTypes)
+	if not content_blocks:
+		content_blocks.append({
+			"id": "ic_dash_empty",
+			"type": "header",
+			"data": {
+				"text": (
+					'<span class="h4"><b>Dashboard</b></span>'
+					'<p class="text-muted">Number cards and charts will appear after '
+					"Insurance DocTypes are installed and data is available.</p>"
+				),
+				"col": 12,
+			},
+		})
+
+	_upsert_workspace(
+		"Insurance Dashboard",
+		title="Dashboard",
+		icon="dashboard",
+		content_blocks=content_blocks,
+		charts=charts,
+		number_cards=number_cards,
+		sequence_id=2.0,
+	)
 
 
 def ensure_workspace_sidebar():
 	"""Create or repair Workspace Sidebar so desk left nav matches portal sidebar.
 
 	v15/v16 left sidebar is driven by DocType **Workspace Sidebar** (items table).
-	Desktop Icon links to this by title ("Insurance Core"). Groups/order mirror
-	portal App.vue navGroups: Catalog → Policies → Claims → Operations → System.
+	Desktop Icon links to this by title ("Insurance Core").
+
+	Order: Home + Dashboard workspaces first, then module groups
+	(Catalog → Policies → Claims → Operations → System) matching portal navGroups.
 
 	Vue/Vite SPA is optional — desk works fully without the frontend build.
 	"""
@@ -641,9 +979,14 @@ def ensure_workspace_sidebar():
 		row = {"type": spec["type"], "label": spec.get("label") or ""}
 		if spec["type"] == "Link":
 			link_to = spec.get("link_to")
-			if link_to and not _doctype_exists(link_to):
-				return None
-			row["link_type"] = spec.get("link_type", "DocType")
+			link_type = spec.get("link_type", "DocType")
+			# Validate target exists for the given link_type
+			if link_to:
+				if link_type == "DocType" and not _doctype_exists(link_to):
+					return None
+				if link_type == "Workspace" and not _workspace_exists(link_to):
+					return None
+			row["link_type"] = link_type
 			row["link_to"] = link_to
 		if "icon" in item_fields and spec.get("icon"):
 			row["icon"] = spec["icon"]

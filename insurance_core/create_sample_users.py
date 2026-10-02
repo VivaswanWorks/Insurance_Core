@@ -8,9 +8,13 @@ Roles (from insurance_core.install.ROLES):
   - Compliance Officer
   - Insurance User
 
-All passwords: admin
+All passwords: Demo@Insure1
+(Frappe rejects very common passwords such as "admin".)
 
-Run on site:
+Auto-runs when demo data is installed (CLI prompt "yes" or
+  bench execute insurance_core.demo_data.install_demo_data).
+
+Manual:
   bench --site <site> execute insurance_core.create_sample_users.create_sample_users
 
 Or from bench console:
@@ -25,7 +29,8 @@ from __future__ import annotations
 
 import frappe
 
-PASSWORD = "admin"
+# Must pass Frappe password policy (not in common-password list)
+PASSWORD = "Demo@Insure1"
 
 # email, first_name, last_name, roles, user_type, description
 SAMPLE_USERS = [
@@ -126,16 +131,42 @@ def create_sample_users() -> list[dict]:
 			}
 		)
 		user.flags.ignore_permissions = True
-		user.insert(ignore_permissions=True)
+		user.flags.ignore_password_policy = True
+		try:
+			user.insert(ignore_permissions=True)
+		except Exception:
+			# Fallback: insert without new_password, set hash directly
+			user = frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": email,
+					"first_name": spec["first_name"],
+					"last_name": spec["last_name"],
+					"enabled": 1,
+					"send_welcome_email": 0,
+					"user_type": spec["user_type"],
+				}
+			)
+			user.flags.ignore_permissions = True
+			user.insert(ignore_permissions=True)
+			from frappe.utils.password import update_password
+
+			update_password(user=email, pwd=PASSWORD)
 
 		# Assign roles
 		for role in spec["roles"]:
 			user.add_roles(role)
 
 		# Force password again after roles (some versions clear it)
-		user.reload()
-		user.new_password = PASSWORD
-		user.save(ignore_permissions=True)
+		try:
+			user.reload()
+			user.flags.ignore_password_policy = True
+			user.new_password = PASSWORD
+			user.save(ignore_permissions=True)
+		except Exception:
+			from frappe.utils.password import update_password
+
+			update_password(user=email, pwd=PASSWORD)
 
 		results.append(
 			{
@@ -154,15 +185,21 @@ def create_sample_users() -> list[dict]:
 def update_sample_user_passwords() -> list[dict]:
 	"""Reset password to PASSWORD for every sample user that already exists."""
 	results = []
+	from frappe.utils.password import update_password
+
 	for spec in SAMPLE_USERS:
 		email = spec["email"]
 		if not frappe.db.exists("User", email):
 			results.append({"email": email, "status": "missing"})
 			continue
-		user = frappe.get_doc("User", email)
-		user.new_password = PASSWORD
-		user.flags.ignore_permissions = True
-		user.save(ignore_permissions=True)
+		try:
+			user = frappe.get_doc("User", email)
+			user.flags.ignore_permissions = True
+			user.flags.ignore_password_policy = True
+			user.new_password = PASSWORD
+			user.save(ignore_permissions=True)
+		except Exception:
+			update_password(user=email, pwd=PASSWORD)
 		results.append({"email": email, "status": "password_updated", "password": PASSWORD})
 	frappe.db.commit()  # nosemgrep
 	return results
@@ -173,7 +210,7 @@ def print_login_card() -> None:
 	print()
 	print("=" * 72)
 	print("  SAMPLE USERS FOR CLIENT SHOWCASE")
-	print("  Password for ALL users:  admin")
+	print(f"  Password for ALL users:  {PASSWORD}")
 	print("=" * 72)
 	for s in SAMPLE_USERS:
 		print(f"  {s['email']:<28}  roles: {', '.join(s['roles'])}")

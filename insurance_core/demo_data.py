@@ -1326,13 +1326,175 @@ def _exists(doctype: str, filters: dict) -> bool:
 	return bool(frappe.db.exists(doctype, filters))
 
 
+# First error per DocType (for install summary / debugging)
+_SEED_ERRORS: dict[str, str] = {}
+
+
+def _log_seed_error(doctype: str, err: Exception) -> None:
+	if doctype not in _SEED_ERRORS:
+		_SEED_ERRORS[doctype] = f"{type(err).__name__}: {err}"
+		try:
+			frappe.logger("insurance_core").error(f"demo_data seed {doctype}: {_SEED_ERRORS[doctype]}")
+		except Exception:
+			pass
+
+
+def _filter_fields_for_doctype(doctype: str, data: dict) -> dict:
+	"""Drop keys that are not real fields on the DocType (avoids insert failures)."""
+	if not frappe.db.exists("DocType", doctype):
+		return data
+	try:
+		meta = frappe.get_meta(doctype)
+		allowed = {df.fieldname for df in meta.fields if df.fieldname}
+		allowed |= {"name", "owner", "creation", "modified", "modified_by", "docstatus", "idx", "doctype"}
+		# Keep table/child rows if present
+		return {k: v for k, v in data.items() if k in allowed or isinstance(v, list)}
+	except Exception:
+		return data
+
+
+def _resolve_agent_name(agent_ref: str | None) -> str | None:
+	"""Map agent_code or name to Insurance Agent document name."""
+	if not agent_ref:
+		return None
+	if not frappe.db.exists("DocType", "Insurance Agent"):
+		return agent_ref
+	if frappe.db.exists("Insurance Agent", agent_ref):
+		return agent_ref
+	name = frappe.db.get_value("Insurance Agent", {"agent_code": agent_ref}, "name")
+	return name or agent_ref
+
+
+def _safe_fields(doctype: str, preferred: list[str]) -> list[str]:
+	"""Return preferred fieldnames that actually exist on the DocType (for get_all)."""
+	if not frappe.db.exists("DocType", doctype):
+		return ["name"]
+	try:
+		meta = frappe.get_meta(doctype)
+		have = {df.fieldname for df in meta.fields}
+		out = ["name"]
+		for f in preferred:
+			if f in have and f not in out:
+				out.append(f)
+		return out
+	except Exception:
+		return ["name"] + [f for f in preferred if f != "name"]
+
+
+def _amount_from_row(row, *candidates, default: float = 0.0) -> float:
+	"""Read first present amount-like attribute from a get_all row."""
+	for key in candidates:
+		val = row.get(key) if isinstance(row, dict) else getattr(row, key, None)
+		if val is not None:
+			try:
+				return float(val)
+			except (TypeError, ValueError):
+				continue
+	return float(default)
+
+
+def _ensure_insurance_settings() -> None:
+	"""Create the Insurance Settings Single if the DocType exists but has no row.
+
+	Several controllers call frappe.get_single('Insurance Settings') on
+	Policy / Claim insert; a missing Single surfaces as DoesNotExistError /
+	ProgrammingError and aborts the insert.
+	"""
+	if not frappe.db.exists("DocType", "Insurance Settings"):
+		return
+	try:
+		# Singles live in tabSingles; get_single throws if never saved
+		if frappe.db.get_single_value("Insurance Settings", "name", cache=False) is not None:
+			return
+	except Exception:
+		pass
+	try:
+		# Prefer loading defaults from DocType meta
+		doc = frappe.new_doc("Insurance Settings")
+		doc.flags.ignore_permissions = True
+		doc.flags.ignore_mandatory = True
+		doc.flags.ignore_validate = True
+		# Some sites use is_single=1 with name fixed to the DocType
+		try:
+			doc.name = "Insurance Settings"
+		except Exception:
+			pass
+		doc.insert(ignore_permissions=True, ignore_mandatory=True)
+		frappe.db.commit()
+	except Exception:
+		# Last resort: ensure at least one tabSingles marker row exists
+		try:
+			if not frappe.db.exists("Singles", {"doctype": "Insurance Settings"}):
+				frappe.db.sql(
+					"INSERT IGNORE INTO `tabSingles` (`doctype`, `field`, `value`) "
+					"VALUES (%s, %s, %s)",
+					("Insurance Settings", "name", "Insurance Settings"),
+				)
+				frappe.db.commit()
+		except Exception as e:
+			_log_seed_error("Insurance Settings", e)
+
+
 def _insert(doctype: str, data: dict, unique_filters: dict | None = None) -> str | None:
-	"""Insert if not exists. Returns name or None if skipped."""
+	"""Insert if not exists. Returns name or None if skipped/failed.
+
+	Never raises — logs the first error per DocType so later seeders still run.
+	Uses ignore_validate / ignore_links so demo rows are not blocked by
+	missing Singles (e.g. Insurance Settings) or strict Link checks.
+	Falls back to db_insert when controller validate still blocks.
+	"""
+	if not frappe.db.exists("DocType", doctype):
+		_log_seed_error(doctype, Exception(f"DocType '{doctype}' does not exist"))
+		return None
 	if unique_filters and _exists(doctype, unique_filters):
 		return frappe.db.get_value(doctype, unique_filters, "name")
-	doc = frappe.get_doc({"doctype": doctype, **data})
-	doc.insert(ignore_permissions=True, ignore_mandatory=True)
-	return doc.name
+	payload = _filter_fields_for_doctype(doctype, dict(data))
+	if "agent" in payload and payload["agent"]:
+		payload["agent"] = _resolve_agent_name(payload["agent"])
+	try:
+		doc = frappe.get_doc({"doctype": doctype, **payload})
+		doc.flags.ignore_permissions = True
+		doc.flags.ignore_mandatory = True
+		doc.flags.ignore_validate = True
+		doc.flags.ignore_links = True
+		doc.insert(ignore_permissions=True, ignore_mandatory=True)
+		return doc.name
+	except Exception as e1:
+		# Retry once after ensuring Insurance Settings exists (common blocker)
+		msg = str(e1)
+		if "Insurance Settings" in msg:
+			_ensure_insurance_settings()
+			try:
+				doc = frappe.get_doc({"doctype": doctype, **payload})
+				doc.flags.ignore_permissions = True
+				doc.flags.ignore_mandatory = True
+				doc.flags.ignore_validate = True
+				doc.flags.ignore_links = True
+				doc.insert(ignore_permissions=True, ignore_mandatory=True)
+				return doc.name
+			except Exception as e2:
+				e1 = e2
+		# Nuclear option for demo: bypass controllers entirely
+		try:
+			doc = frappe.get_doc({"doctype": doctype, **payload})
+			doc.flags.ignore_permissions = True
+			doc.flags.ignore_mandatory = True
+			doc.flags.ignore_validate = True
+			doc.flags.ignore_links = True
+			doc.db_insert()
+			# Child tables if any
+			if hasattr(doc, "get_all_children"):
+				for child in doc.get_all_children() or []:
+					try:
+						child.parent = doc.name
+						child.parenttype = doctype
+						child.db_insert()
+					except Exception:
+						pass
+			return doc.name
+		except Exception as e3:
+			_log_seed_error(doctype, e3 if e3 else e1)
+			return None
 
 
 def _random_name() -> str:
@@ -1480,21 +1642,67 @@ def seed_clients(count: int = 800):
 
 def seed_policies(count: int = 600):
 	"""Policies distributed across schemes (~75% of client base)."""
+	if not frappe.db.exists("DocType", "Insurance Policy"):
+		_log_seed_error("Insurance Policy", Exception("DocType does not exist"))
+		return 0
+
 	clients = frappe.get_all(
 		"Insurance Client",
 		filters={"client_id": ["like", "CLT-DEMO-%"]},
 		fields=["name", "client_id", "full_name", "agent"],
 		limit=count + 50,
 	)
+	if not clients:
+		# Fall back to any clients if demo id pattern missing
+		clients = frappe.get_all(
+			"Insurance Client",
+			fields=["name", "client_id", "full_name", "agent"],
+			limit=count + 50,
+		)
+
+	scheme_fields = _safe_fields(
+		"Insurance Scheme",
+		[
+			"scheme_id",
+			"provider",
+			"scheme_name",
+			"line_of_business",
+			"minimum_sum_assured",
+			"maximum_sum_assured",
+		],
+	)
 	schemes = frappe.get_all(
 		"Insurance Scheme",
-		filters={"scheme_id": ["like", "SCH-%"]},
-		fields=["name", "scheme_id", "provider", "scheme_name", "line_of_business"],
+		filters={"scheme_id": ["like", "SCH-%"]} if "scheme_id" in scheme_fields else None,
+		fields=scheme_fields,
 	)
+	if not schemes:
+		schemes = frappe.get_all(
+			"Insurance Scheme",
+			fields=scheme_fields,
+			limit=50,
+		)
+
 	if not clients or not schemes:
+		_log_seed_error(
+			"Insurance Policy",
+			Exception(f"Missing prerequisites: clients={len(clients or [])} schemes={len(schemes or [])}"),
+		)
 		return 0
 
+	# Prefer status options that exist on the DocType
 	statuses = ["Active", "Active", "Active", "Active", "Grace Period", "Lapsed", "Expired", "Draft"]
+	try:
+		meta = frappe.get_meta("Insurance Policy")
+		status_df = meta.get_field("status")
+		if status_df and status_df.options:
+			opts = [o.strip() for o in status_df.options.split("\n") if o.strip()]
+			if opts:
+				# Bias toward Active when present
+				statuses = (["Active"] * 4 + opts) if "Active" in opts else opts
+	except Exception:
+		pass
+
 	levels = ["Basic", "Standard", "Premium", "Platinum"]
 	freqs = ["Annually", "Semi-Annually", "Quarterly", "Monthly"]
 	created = 0
@@ -1505,14 +1713,23 @@ def seed_policies(count: int = 600):
 		if _exists("Insurance Policy", {"policy_number": policy_number}):
 			continue
 		client = clients[i % len(clients)]
-		# Round-robin schemes so distribution is even across products
 		scheme = schemes[i % len(schemes)]
 		start = getdate(_date_between(date(2023, 1, 1), date(2025, 6, 1)))
 		end = add_months(start, 12)
-		sum_assured = random.choice([300000, 500000, 750000, 1000000, 1500000, 2000000, 5000000])
+		# Stay within scheme min/max SI so endorsements / claim rules do not reject
+		si_min = float(getattr(scheme, "minimum_sum_assured", None) or 100000)
+		si_max = float(getattr(scheme, "maximum_sum_assured", None) or 5000000)
+		if si_max < si_min:
+			si_max = si_min
+		candidates = [v for v in (100000, 200000, 300000, 500000, 750000, 1000000, 1500000, 2000000, 5000000) if si_min <= v <= si_max]
+		if not candidates:
+			sum_assured = si_min
+		else:
+			sum_assured = random.choice(candidates)
 		premium = round(sum_assured * random.uniform(0.008, 0.035), 0)
 		gst = round(premium * 0.18, 0)
 		comm_rate = random.choice([10, 12, 12.5, 15, 18])
+		agent_ref = getattr(client, "agent", None) or random.choice(AGENTS)["agent_code"]
 		data = {
 			"policy_number": policy_number,
 			"client": client.name,
@@ -1527,7 +1744,7 @@ def seed_policies(count: int = 600):
 			"end_date": str(end),
 			"renewal_date": str(end),
 			"status": statuses[i % len(statuses)],
-			"agent": client.agent or random.choice(AGENTS)["agent_code"],
+			"agent": _resolve_agent_name(agent_ref),
 			"commission_rate": comm_rate,
 			"commission_amount": round(premium * comm_rate / 100, 0),
 			"issue_date": str(start),
@@ -1535,28 +1752,47 @@ def seed_policies(count: int = 600):
 			"total_premium": premium + gst,
 			"next_premium_due": str(add_months(start, random.choice([1, 3, 6, 12]))),
 			"payment_status": random.choice(["Paid", "Paid", "Partially Paid", "Unpaid", "Overdue"]),
-			"notes": f"Demo policy – {scheme.scheme_name} for {client.full_name}.",
+			"notes": f"Demo policy – {scheme.scheme_name or scheme.name} for {client.full_name or client.name}.",
 		}
 		if i % 5 == 0 and _exists("Insurance Provider", {"provider_id": "PROV-GIPSA"}):
 			data["reinsurance_type"] = "Treaty"
 			data["reinsurer"] = "PROV-GIPSA"
 			data["cession_percentage"] = random.choice([20, 25, 30, 40])
-		_insert("Insurance Policy", data, {"policy_number": policy_number})
-		created += 1
+		name = _insert("Insurance Policy", data, {"policy_number": policy_number})
+		if name:
+			created += 1
 		_commit_every(100, batch)
 	return created
 
 
 def seed_claims(count: int = 150):
 	"""~25% of policies have claims."""
+	if not frappe.db.exists("DocType", "Insurance Claim"):
+		_log_seed_error("Insurance Claim", Exception("DocType does not exist"))
+		return 0
+
 	policies = frappe.get_all(
 		"Insurance Policy",
-		filters={"policy_number": ["like", "POL-DEMO-%"], "status": ["in", ["Active", "Grace Period", "Claimed"]]},
-		fields=["name", "policy_number", "client", "provider", "scheme", "agent", "sum_assured"],
-		limit=count + 50,
+		filters={"policy_number": ["like", "POL-DEMO-%"]},
+		fields=["name", "policy_number", "client", "provider", "scheme", "agent", "sum_assured", "status"],
+		limit=count + 100,
 	)
-	hospitals = frappe.get_all("Network Hospital", fields=["name", "hospital_name"], limit=50)
 	if not policies:
+		policies = frappe.get_all(
+			"Insurance Policy",
+			fields=["name", "policy_number", "client", "provider", "scheme", "agent", "sum_assured", "status"],
+			limit=count + 100,
+		)
+	# Prefer active-ish policies when available
+	activeish = [p for p in policies if (p.status or "") in ("Active", "Grace Period", "Claimed", "")]
+	if activeish:
+		policies = activeish
+
+	hospitals = []
+	if frappe.db.exists("DocType", "Network Hospital"):
+		hospitals = frappe.get_all("Network Hospital", fields=["name", "hospital_name"], limit=50)
+	if not policies:
+		_log_seed_error("Insurance Claim", Exception("No Insurance Policy rows to attach claims to"))
 		return 0
 
 	claim_types = ["Cashless", "Reimbursement", "Hospitalization", "Accident", "Other"]
@@ -1587,6 +1823,7 @@ def seed_claims(count: int = 150):
 		incident = getdate(_date_between(date(2024, 6, 1), date(2026, 8, 1)))
 		submission = add_days(incident, random.randint(1, 14))
 
+		diag = random.choice(DIAGNOSES)
 		data = {
 			"claim_number": claim_number,
 			"policy_source": "Internal",
@@ -1602,18 +1839,19 @@ def seed_claims(count: int = 150):
 			"approved_amount": approved,
 			"settled_amount": settled,
 			"status": status,
-			"agent": pol.agent,
+			"agent": _resolve_agent_name(pol.agent) if pol.agent else None,
 			"adjuster": random.choice(["Anil Kumar", "Sneha Gupta", "Vikram Singh", "Meera Joshi"]),
 			"intimation_mode": random.choice(["Portal", "Phone", "Email", "TPA", "Branch"]),
-			"description": f"Demo claim for incident on {incident}. Diagnosis: {random.choice(DIAGNOSES)}.",
-			"diagnosis": random.choice(DIAGNOSES),
+			"description": f"Demo claim for incident on {incident}. Diagnosis: {diag}.",
+			"diagnosis": diag,
 			"deductible": random.choice([0, 0, 5000, 10000]),
 			"co_pay": 0,
 			"currency": "INR",
-			"settlement_mode": "Bank Transfer" if settled else None,
-			"settlement_reference": f"UTR{random.randint(100000000, 999999999)}" if settled else None,
-			"settlement_date": str(add_days(submission, random.randint(7, 45))) if settled else None,
 		}
+		if settled:
+			data["settlement_mode"] = "Bank Transfer"
+			data["settlement_reference"] = f"UTR{random.randint(100000000, 999999999)}"
+			data["settlement_date"] = str(add_days(submission, random.randint(7, 45)))
 		if hospitals and random.random() > 0.3:
 			h = random.choice(hospitals)
 			data["hospital"] = h.name
@@ -1627,14 +1865,10 @@ def seed_claims(count: int = 150):
 				"Treatment not covered under policy terms",
 				"Policy not active on date of incident",
 			])
-			data["decision"] = "Reject"
-		elif status in ("Approved", "Settled", "Closed"):
-			data["decision"] = "Approve"
-		elif status == "Partially Approved":
-			data["decision"] = "Partial Approve"
 
-		_insert("Insurance Claim", data, {"claim_number": claim_number})
-		created += 1
+		name = _insert("Insurance Claim", data, {"claim_number": claim_number})
+		if name:
+			created += 1
 		_commit_every(50, batch)
 	return created
 
@@ -1906,8 +2140,9 @@ def seed_flow_showcase_claims() -> int:
 		if docs and frappe.get_meta("Insurance Claim").has_field("claim_documents"):
 			data["claim_documents"] = docs
 
-		_insert("Insurance Claim", data, {"claim_number": sc["claim_number"]})
-		created += 1
+		name = _insert("Insurance Claim", data, {"claim_number": sc["claim_number"]})
+		if name:
+			created += 1
 
 	return created
 
@@ -2080,13 +2315,21 @@ def seed_cashless_authorizations(count: int = 40) -> int:
 	"""Seed Cashless Authorization records against existing claims + hospitals."""
 	if not frappe.db.exists("DocType", "Cashless Authorization"):
 		return 0
+	claim_fields = _safe_fields(
+		"Insurance Claim",
+		["policy", "client", "claimed_amount", "claim_amount", "approved_amount", "claim_number"],
+	)
 	claims = frappe.get_all(
 		"Insurance Claim",
-		filters={"claim_number": ["like", "CLM-%"]},
-		fields=["name", "policy", "client", "claim_amount"],
+		filters={"claim_number": ["like", "CLM-%"]} if "claim_number" in claim_fields else None,
+		fields=claim_fields,
 		limit=count + 30,
 	)
-	hospitals = frappe.get_all("Network Hospital", fields=["name"], limit=40)
+	if not claims:
+		claims = frappe.get_all("Insurance Claim", fields=claim_fields, limit=count + 30)
+	hospitals = []
+	if frappe.db.exists("DocType", "Network Hospital"):
+		hospitals = frappe.get_all("Network Hospital", fields=["name"], limit=40)
 	providers = frappe.get_all(
 		"Insurance Provider",
 		filters={"provider_id": ["like", "PROV-%"]},
@@ -2094,7 +2337,7 @@ def seed_cashless_authorizations(count: int = 40) -> int:
 		limit=20,
 	)
 	tpas = [p for p in providers if "TPA" in (p.name or "").upper() or "MEDI" in (p.name or "").upper()]
-	if not claims or not hospitals:
+	if not claims:
 		return 0
 	statuses = ["Requested", "Under Review", "Approved", "Rejected", "Utilized", "Query Raised"]
 	diagnoses = [
@@ -2113,14 +2356,15 @@ def seed_cashless_authorizations(count: int = 40) -> int:
 			if _exists("Cashless Authorization", {"claim": claim.name}):
 				continue
 			status = statuses[i % len(statuses)]
-			req_amt = float(claim.claim_amount or 50000) * random.uniform(0.6, 1.1)
+			base = _amount_from_row(claim, "claimed_amount", "claim_amount", "approved_amount", default=50000)
+			req_amt = base * random.uniform(0.6, 1.1)
 			approved = req_amt * random.uniform(0.7, 1.0) if status in ("Approved", "Utilized") else 0
 			utilized = approved * random.uniform(0.8, 1.0) if status == "Utilized" else 0
 			data = {
 				"claim": claim.name,
-				"policy": claim.policy,
-				"client": claim.client,
-				"hospital": hospitals[i % len(hospitals)].name,
+				"policy": getattr(claim, "policy", None),
+				"client": getattr(claim, "client", None),
+				"hospital": hospitals[i % len(hospitals)].name if hospitals else None,
 				"tpa": (tpas[i % len(tpas)].name if tpas else (providers[i % len(providers)].name if providers else None)),
 				"provider": providers[i % len(providers)].name if providers else None,
 				"status": status,
@@ -2135,10 +2379,11 @@ def seed_cashless_authorizations(count: int = 40) -> int:
 				"remarks": "Demo cashless authorization for Indian hospital network.",
 			}
 			data = {k: v for k, v in data.items() if v is not None}
-			_insert("Cashless Authorization", data)
-			created += 1
-		except Exception:
-			pass
+			name = _insert("Cashless Authorization", data)
+			if name:
+				created += 1
+		except Exception as e:
+			_log_seed_error("Cashless Authorization", e)
 	return created
 
 
@@ -2146,18 +2391,27 @@ def seed_policy_endorsements(count: int = 60) -> int:
 	"""Seed Policy Endorsement records for a subset of demo policies."""
 	if not frappe.db.exists("DocType", "Policy Endorsement"):
 		return 0
+	# Only endorse Active / Grace Period policies (controller rejects Expired/Lapsed)
+	pol_fields = _safe_fields("Insurance Policy", ["policy_number", "status"])
 	policies = frappe.get_all(
 		"Insurance Policy",
-		filters={"policy_number": ["like", "POL-%"]},
-		fields=["name", "policy_number"],
+		filters={"status": ["in", ["Active", "Grace Period"]]} if "status" in pol_fields else None,
+		fields=pol_fields,
 		limit=count + 40,
 	)
 	if not policies:
+		policies = frappe.get_all(
+			"Insurance Policy",
+			filters={"policy_number": ["like", "POL-%"]} if "policy_number" in pol_fields else None,
+			fields=pol_fields,
+			limit=count + 40,
+		)
+	if not policies:
 		return 0
+	# Avoid "Sum Insured Change" — controllers reject SI above scheme maximum
 	types = [
 		"Member Addition",
 		"Member Deletion",
-		"Sum Insured Change",
 		"Address Change",
 		"Nominee Change",
 		"Correction",
@@ -2174,16 +2428,13 @@ def seed_policy_endorsements(count: int = 60) -> int:
 			etype = types[i % len(types)]
 			status = statuses[i % len(statuses)]
 			impact = 0
-			if etype == "Sum Insured Change":
-				impact = random.choice([2500, 5000, -1500, 10000])
-			elif etype == "Member Addition":
+			if etype == "Member Addition":
 				impact = random.choice([3000, 4500, 6000])
 			elif etype == "Cancellation":
 				impact = -random.choice([2000, 5000, 8000])
 			desc_map = {
 				"Member Addition": "Adding spouse as dependent member effective from endorsement date.",
 				"Member Deletion": "Removing dependent child who has attained majority.",
-				"Sum Insured Change": "Enhancing sum insured as requested by proposer’s financial planner.",
 				"Address Change": "Updating correspondence address post relocation.",
 				"Nominee Change": "Updating nominee details as per latest declaration.",
 				"Correction": "Correcting spelling error in insured name on policy schedule.",
@@ -2200,10 +2451,11 @@ def seed_policy_endorsements(count: int = 60) -> int:
 				"old_value": "Previous value (demo)",
 				"new_value": "Updated value (demo)",
 			}
-			_insert("Policy Endorsement", data, {"endorsement_number": end_no})
-			created += 1
-		except Exception:
-			pass
+			name = _insert("Policy Endorsement", data, {"endorsement_number": end_no})
+			if name:
+				created += 1
+		except Exception as e:
+			_log_seed_error("Policy Endorsement", e)
 	return created
 
 
@@ -2211,9 +2463,13 @@ def seed_claim_recoveries(count: int = 25) -> int:
 	"""Seed Claim Recovery (subrogation / reinsurance / salvage) against settled-ish claims."""
 	if not frappe.db.exists("DocType", "Claim Recovery"):
 		return 0
+	claim_fields = _safe_fields(
+		"Insurance Claim",
+		["claimed_amount", "claim_amount", "approved_amount", "settled_amount"],
+	)
 	claims = frappe.get_all(
 		"Insurance Claim",
-		fields=["name", "claim_amount"],
+		fields=claim_fields,
 		limit=count + 20,
 	)
 	if not claims:
@@ -2234,7 +2490,9 @@ def seed_claim_recoveries(count: int = 25) -> int:
 				continue
 			rtype = types[i % len(types)]
 			status = statuses[i % len(statuses)]
-			base = float(claim.claim_amount or 80000)
+			base = _amount_from_row(
+				claim, "settled_amount", "approved_amount", "claimed_amount", "claim_amount", default=80000
+			)
 			amt = round(base * random.uniform(0.05, 0.35), 2)
 			data = {
 				"claim": claim.name,
@@ -2246,10 +2504,11 @@ def seed_claim_recoveries(count: int = 25) -> int:
 				"notes": f"Demo {rtype.lower()} recovery linked to claim {claim.name}.",
 			}
 			data = {k: v for k, v in data.items() if v is not None}
-			_insert("Claim Recovery", data)
-			created += 1
-		except Exception:
-			pass
+			name = _insert("Claim Recovery", data)
+			if name:
+				created += 1
+		except Exception as e:
+			_log_seed_error("Claim Recovery", e)
 	return created
 
 
@@ -2299,12 +2558,19 @@ def seed_communications(count: int = 100) -> int:
 	"""Seed Insurance Communication (renewal / claim / KYC messages)."""
 	if not frappe.db.exists("DocType", "Insurance Communication"):
 		return 0
+	# Client phone field is typically `phone` (not `mobile`) on this app
+	client_fields = _safe_fields(
+		"Insurance Client",
+		["full_name", "email", "phone", "mobile", "client_id"],
+	)
 	clients = frappe.get_all(
 		"Insurance Client",
-		filters={"client_id": ["like", "CLT-DEMO-%"]},
-		fields=["name", "full_name", "email", "mobile"],
+		filters={"client_id": ["like", "CLT-DEMO-%"]} if "client_id" in client_fields else None,
+		fields=client_fields,
 		limit=count + 30,
 	)
+	if not clients:
+		clients = frappe.get_all("Insurance Client", fields=client_fields, limit=count + 30)
 	if not clients:
 		return 0
 	templates = [
@@ -2330,10 +2596,12 @@ def seed_communications(count: int = 100) -> int:
 				continue
 			tmpl = templates[i % len(templates)]
 			channel = channels[i % len(channels)]
-			recipient = (client.email if channel == "Email" else (client.mobile or client.email or "demo@example.com"))
+			phone = getattr(client, "phone", None) or getattr(client, "mobile", None)
+			email = getattr(client, "email", None)
+			recipient = email if channel == "Email" else (phone or email or "demo@example.com")
 			data = {
 				"comm_id": comm_id,
-				"subject": f"{tmpl} – {client.full_name or client.name}",
+				"subject": f"{tmpl} – {getattr(client, 'full_name', None) or client.name}",
 				"channel": channel,
 				"template": tmpl,
 				"recipient": recipient or "demo@example.com",
@@ -2341,13 +2609,14 @@ def seed_communications(count: int = 100) -> int:
 				"related_name": client.name,
 				"scheduled_at": f"{add_days(nowdate(), -random.randint(0, 45))} {random.randint(9, 18):02d}:00:00",
 				"status": statuses[i % len(statuses)],
-				"body": f"<p>Demo message for {tmpl}.</p><p>Dear {client.full_name or 'Customer'}, this is sample communication from Insurance Core.</p>",
+				"body": f"<p>Demo message for {tmpl}.</p><p>Dear {getattr(client, 'full_name', None) or 'Customer'}, this is sample communication from Insurance Core.</p>",
 				"client": client.name,
 			}
-			_insert("Insurance Communication", data, {"comm_id": comm_id})
-			created += 1
-		except Exception:
-			pass
+			name = _insert("Insurance Communication", data, {"comm_id": comm_id})
+			if name:
+				created += 1
+		except Exception as e:
+			_log_seed_error("Insurance Communication", e)
 	return created
 
 
@@ -2492,6 +2761,355 @@ def seed_insurer_rfq_rules() -> int:
 
 
 # ---------------------------------------------------------------------------
+# Showcase opportunities + sample RFQs (broker panel demos)
+# ---------------------------------------------------------------------------
+
+SHOWCASE_OPPORTUNITIES = [
+	{
+		"name": "OPP-RFQ-DEMO-01",
+		"line_of_business": "Health",
+		"client_type": "Family",
+		"required_sum_insured": 1500000,
+		"proposer_age": 42,
+		"expected_premium": 45000,
+		"status": "Proposal",
+		"notes": "Family floater – parents + 2 children. Pre-existing diabetes on primary. Broker panel RFQ showcase.",
+	},
+	{
+		"name": "OPP-RFQ-DEMO-02",
+		"line_of_business": "Property",
+		"client_type": "SME",
+		"required_sum_insured": 25000000,
+		"proposer_age": 0,
+		"expected_premium": 180000,
+		"status": "Negotiation",
+		"notes": "SME warehouse + office complex, Mumbai suburbs. Fire + burglary + loss of rent.",
+	},
+	{
+		"name": "OPP-RFQ-DEMO-03",
+		"line_of_business": "Engineering",
+		"client_type": "Corporate",
+		"required_sum_insured": 500000000,
+		"proposer_age": 0,
+		"expected_premium": 1200000,
+		"status": "Qualified",
+		"notes": "CAR for metro elevated corridor package – 24 month construction period. ALOP requested.",
+	},
+	{
+		"name": "OPP-RFQ-DEMO-04",
+		"line_of_business": "Auto",
+		"client_type": "Corporate",
+		"required_sum_insured": 8000000,
+		"proposer_age": 0,
+		"expected_premium": 95000,
+		"status": "Open",
+		"notes": "Corporate fleet – 12 sedans + 4 SUVs. Comprehensive + zero dep + engine protect.",
+	},
+	{
+		"name": "OPP-RFQ-DEMO-05",
+		"line_of_business": "Liability",
+		"client_type": "Corporate",
+		"required_sum_insured": 100000000,
+		"proposer_age": 0,
+		"expected_premium": 350000,
+		"status": "Proposal",
+		"notes": "D&O + Cyber liability package for mid-size IT services firm, Bengaluru.",
+	},
+]
+
+RFQ_STATUS_CYCLE = ["Draft", "Sent", "Quotes Received", "Closed"]
+
+
+def _ensure_demo_erpnext_rfq(rfq_name: str, company: str | None, message: str) -> str | None:
+	"""Create a minimal ERPNext Request for Quotation if the DocType exists."""
+	if not frappe.db.exists("DocType", "Request for Quotation"):
+		return None
+	if frappe.db.exists("Request for Quotation", rfq_name):
+		return rfq_name
+	try:
+		rfq = frappe.new_doc("Request for Quotation")
+		# Prefer explicit name when allowed; fall back to autoname
+		try:
+			rfq.name = rfq_name
+		except Exception:
+			pass
+		rfq.transaction_date = nowdate()
+		if company:
+			rfq.company = company
+		rfq.message_for_supplier = message
+		# Minimal item so the document can save on sites that require items
+		if frappe.db.exists("DocType", "Item"):
+			item_code = None
+			existing = frappe.db.get_value("Item", {"item_code": "INSURANCE-DEMO"}, "name")
+			if existing:
+				item_code = "INSURANCE-DEMO"
+			else:
+				try:
+					item = frappe.get_doc({
+						"doctype": "Item",
+						"item_code": "INSURANCE-DEMO",
+						"item_name": "Insurance Cover (Demo)",
+						"item_group": frappe.db.get_value("Item Group", {"is_group": 0}, "name") or "All Item Groups",
+						"stock_uom": "Nos",
+						"is_stock_item": 0,
+						"include_item_in_manufacturing": 0,
+					})
+					item.insert(ignore_permissions=True, ignore_mandatory=True)
+					item_code = "INSURANCE-DEMO"
+				except Exception:
+					item_code = frappe.db.get_value("Item", {}, "name")
+			if item_code:
+				rfq.append(
+					"items",
+					{
+						"item_code": item_code,
+						"qty": 1,
+						"schedule_date": nowdate(),
+						"description": message[:140],
+					},
+				)
+		rfq.insert(ignore_permissions=True, ignore_mandatory=True)
+		return rfq.name
+	except Exception:
+		return None
+
+
+def seed_showcase_opportunities_and_rfqs() -> dict:
+	"""
+	Seed 5 curated Insurance Opportunities and 3–4 sample Insurance RFQ Detail
+	records per opportunity (broker panel demo path).
+
+	Also creates companion ERPNext Request for Quotation documents when that
+	DocType is available; otherwise RFQ Detail is inserted with ignore_mandatory.
+	"""
+	result = {"opportunities": 0, "rfq_details": 0, "erpnext_rfqs": 0, "quotations": 0}
+	if not frappe.db.exists("DocType", "Insurance Opportunity"):
+		return result
+
+	clients = frappe.get_all(
+		"Insurance Client",
+		filters={"client_id": ["like", "CLT-DEMO-%"]},
+		fields=["name", "full_name", "agent"],
+		limit=20,
+	)
+	if not clients:
+		# Fall back to any client
+		clients = frappe.get_all(
+			"Insurance Client",
+			fields=["name", "full_name", "agent"],
+			limit=10,
+		)
+	if not clients:
+		return result
+
+	providers = frappe.get_all(
+		"Insurance Provider",
+		filters={"provider_id": ["like", "PROV-%"]},
+		fields=["name", "provider_id", "brand_name", "erpnext_supplier"],
+		limit=15,
+	)
+	# Prefer underwriting providers (skip obvious TPAs)
+	underwriters = [
+		p for p in providers
+		if not any(x in (p.brand_name or p.name or "").upper() for x in ("TPA", "MEDI ASSIST", "PARAM"))
+	] or providers
+
+	schemes = frappe.get_all(
+		"Insurance Scheme",
+		filters={"scheme_id": ["like", "SCH-%"]},
+		fields=["name", "scheme_id", "provider", "scheme_name", "line_of_business"],
+		limit=40,
+	)
+	schemes_by_lob: dict[str, list] = {}
+	for s in schemes:
+		schemes_by_lob.setdefault(s.line_of_business or "Health", []).append(s)
+
+	company = None
+	try:
+		company = frappe.defaults.get_user_default("Company") or frappe.db.get_single_value(
+			"Global Defaults", "default_company"
+		)
+	except Exception:
+		company = None
+
+	has_rfq_detail = frappe.db.exists("DocType", "Insurance RFQ Detail")
+	has_quotation = frappe.db.exists("DocType", "Insurance Quotation")
+
+	for idx, spec in enumerate(SHOWCASE_OPPORTUNITIES):
+		client = clients[idx % len(clients)]
+		lob = spec["line_of_business"]
+		scheme_list = schemes_by_lob.get(lob) or schemes
+		scheme = scheme_list[idx % len(scheme_list)] if scheme_list else None
+
+		opp_name = spec["name"]
+		if not _exists("Insurance Opportunity", {"name": opp_name}):
+			opp_data = {
+				"doctype": "Insurance Opportunity",
+				"name": opp_name,
+				"client": client.name,
+				"status": spec["status"],
+				"expected_premium": spec["expected_premium"],
+				"notes": spec["notes"],
+				"agent": client.agent,
+			}
+			if scheme:
+				opp_data["scheme"] = scheme.name
+				opp_data["provider"] = scheme.provider
+			# Optional RFQ-oriented fields (added by rfq_extension installer)
+			meta = frappe.get_meta("Insurance Opportunity")
+			if meta.has_field("line_of_business"):
+				opp_data["line_of_business"] = lob
+			if meta.has_field("required_sum_insured"):
+				opp_data["required_sum_insured"] = spec["required_sum_insured"]
+			if meta.has_field("proposer_age") and spec["proposer_age"]:
+				opp_data["proposer_age"] = spec["proposer_age"]
+			if meta.has_field("client_type"):
+				opp_data["client_type"] = spec["client_type"]
+			try:
+				doc = frappe.get_doc(opp_data)
+				doc.insert(ignore_permissions=True, ignore_mandatory=True)
+				result["opportunities"] += 1
+			except Exception:
+				pass
+
+		if not has_rfq_detail:
+			continue
+
+		# 3–4 RFQs per opportunity (status progression across rounds)
+		n_rfqs = 3 + (idx % 2)  # 3 or 4
+		for r in range(1, n_rfqs + 1):
+			detail_key = f"{opp_name}-R{r}"
+			# Prefer stable names when possible
+			if frappe.db.exists("Insurance RFQ Detail", detail_key):
+				continue
+			# Also skip if a detail already exists for a synthetic ERPNext RFQ name
+			erp_rfq_name = f"RFQ-DEMO-{opp_name[-2:]}-{r:02d}"
+			if frappe.db.exists("Insurance RFQ Detail", {"request_for_quotation": erp_rfq_name}):
+				continue
+
+			status = RFQ_STATUS_CYCLE[(r - 1) % len(RFQ_STATUS_CYCLE)]
+			message = (
+				f"Demo RFQ round {r} for {opp_name} – {lob}, "
+				f"SI {spec['required_sum_insured']:,}. {spec['notes'][:120]}"
+			)
+			created_rfq = _ensure_demo_erpnext_rfq(erp_rfq_name, company, message)
+			if created_rfq:
+				result["erpnext_rfqs"] += 1
+				link_rfq = created_rfq
+			else:
+				# Synthetic link when ERPNext RFQ is unavailable; ignore_mandatory on insert
+				link_rfq = erp_rfq_name
+
+			# Pick 3–5 insurers for the child table
+			panel = underwriters[: max(3, min(5, len(underwriters)))]
+			if len(underwriters) > 5:
+				# rotate panel slightly per round
+				start = (r - 1) % max(1, len(underwriters) - 2)
+				panel = underwriters[start : start + 4] or underwriters[:4]
+
+			insurers_rows = []
+			for p in panel:
+				inv_status = "Invited"
+				if status in ("Quotes Received", "Closed"):
+					inv_status = random.choice(["Quote Received", "Quote Received", "Declined"])
+				if status == "Closed" and p == panel[0]:
+					inv_status = "Selected"
+				insurers_rows.append({
+					"insurance_provider": p.name,
+					"supplier": getattr(p, "erpnext_supplier", None),
+					"status": inv_status,
+					"invited_on": str(add_days(getdate(nowdate()), -random.randint(5, 40))),
+					"notes": f"Demo invite – {p.brand_name or p.provider_id}",
+				})
+
+			detail_data = {
+				"doctype": "Insurance RFQ Detail",
+				"request_for_quotation": link_rfq,
+				"opportunity": opp_name,
+				"client": client.name,
+				"status": status,
+				"max_insurers": 5,
+				"line_of_business": lob,
+				"required_sum_insured": spec["required_sum_insured"],
+				"proposer_age": spec["proposer_age"] or None,
+				"client_type": spec["client_type"],
+				"risk_summary": f"<p>{spec['notes']}</p><p>Round {r} of broker panel RFQ.</p>",
+				"notes": f"Demo Insurance RFQ Detail for {opp_name} round {r}.",
+				"insurers": insurers_rows,
+			}
+			# Try fixed name for easier discovery
+			try:
+				detail = frappe.get_doc(detail_data)
+				try:
+					detail.name = detail_key
+				except Exception:
+					pass
+				detail.insert(ignore_permissions=True, ignore_mandatory=True)
+				result["rfq_details"] += 1
+				detail_name = detail.name
+			except Exception:
+				# Retry without forced name / without insurers if child meta differs
+				try:
+					detail_data.pop("insurers", None)
+					detail = frappe.get_doc(detail_data)
+					detail.insert(ignore_permissions=True, ignore_mandatory=True)
+					result["rfq_details"] += 1
+					detail_name = detail.name
+				except Exception:
+					continue
+
+			# Link primary (round 1) detail back on Opportunity when field exists
+			if r == 1:
+				try:
+					meta = frappe.get_meta("Insurance Opportunity")
+					if meta.has_field("insurance_rfq_detail"):
+						frappe.db.set_value(
+							"Insurance Opportunity", opp_name, "insurance_rfq_detail", detail_name
+						)
+					if meta.has_field("rfq") and created_rfq:
+						frappe.db.set_value("Insurance Opportunity", opp_name, "rfq", created_rfq)
+				except Exception:
+					pass
+
+			# Seed 1–2 Insurance Quotations for rounds that already have quotes
+			if has_quotation and status in ("Quotes Received", "Closed"):
+				for q_i, p in enumerate(panel[:2]):
+					quo_no = f"QUO-{opp_name[-2:]}-R{r}-{q_i + 1}"
+					if _exists("Insurance Quotation", {"quotation_number": quo_no}) or _exists(
+						"Insurance Quotation", {"name": quo_no}
+					):
+						continue
+					try:
+						premium = round(spec["expected_premium"] * random.uniform(0.85, 1.25), 0)
+						quo_data = {
+							"doctype": "Insurance Quotation",
+							"quotation_number": quo_no,
+							"client": client.name,
+							"provider": p.name,
+							"sum_assured": spec["required_sum_insured"],
+							"premium_amount": premium,
+							"status": "Accepted" if (status == "Closed" and q_i == 0) else "Sent",
+							"valid_till": str(add_days(getdate(nowdate()), 30)),
+							"agent": client.agent,
+						}
+						if scheme:
+							quo_data["scheme"] = scheme.name
+						qmeta = frappe.get_meta("Insurance Quotation")
+						if qmeta.has_field("insurance_rfq_detail"):
+							quo_data["insurance_rfq_detail"] = detail_name
+						if qmeta.has_field("is_selected") and status == "Closed" and q_i == 0:
+							quo_data["is_selected"] = 1
+						quo = frappe.get_doc(quo_data)
+						quo.insert(ignore_permissions=True, ignore_mandatory=True)
+						result["quotations"] += 1
+					except Exception:
+						pass
+
+	frappe.db.commit()
+	return result
+
+
+# ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
 
@@ -2512,37 +3130,106 @@ def install_demo_data(force: bool = False) -> dict:
 	  - 800 clients, 600 policies, 150 claims
 	  - 6 curated Flow AI triage showcase claims (CLM-FLOW-DEMO-*)
 	  - 200 opportunities/quotations, 50 grievances
+	  - 5 showcase opportunities (OPP-RFQ-DEMO-01..05) with 3–4 sample RFQs each
 	  - 25 agents, 30 network hospitals
 	  - Cashless, endorsements, recoveries, commission payouts, KYC, compliance, RFQ rules
+	  - 6 sample users (manager / agent / claims / compliance / user / client) — password: Demo@Insure1
 
 	Idempotent: skips existing unique keys.
 	"""
 	frappe.flags.in_import = True
-	summary = {}
+	summary: dict = {}
+	_SEED_ERRORS.clear()
+
+	def _run(key: str, fn, *args):
+		"""Run one seeder; never abort the whole install."""
+		try:
+			result = fn(*args)
+			summary[key] = result
+			frappe.db.commit()
+			return result
+		except Exception as e:
+			_log_seed_error(key, e)
+			summary[key] = 0
+			try:
+				frappe.db.rollback()
+			except Exception:
+				pass
+			return 0
 
 	try:
-		summary["providers"] = seed_providers()
-		summary["schemes"] = seed_schemes()
-		summary["agents"] = seed_agents()
-		summary["hospitals"] = seed_hospitals()
-		summary["clients"] = seed_clients(CLIENT_COUNT)
-		summary["policies"] = seed_policies(POLICY_COUNT)
-		summary["claims"] = seed_claims(CLAIM_COUNT)
-		summary["flow_showcase_claims"] = seed_flow_showcase_claims()
-		opp, quo = seed_opportunities_and_quotations(OPP_QUO_COUNT)
-		summary["opportunities"] = opp
-		summary["quotations"] = quo
-		summary["grievances"] = seed_grievances(GRIEVANCE_COUNT)
-		summary["commission_rules"] = seed_commission_rules()
-		summary["reinsurance_treaties"] = seed_reinsurance_treaty()
-		summary["cashless_authorizations"] = seed_cashless_authorizations(40)
-		summary["policy_endorsements"] = seed_policy_endorsements(60)
-		summary["claim_recoveries"] = seed_claim_recoveries(25)
-		summary["commission_payouts"] = seed_commission_payouts(80)
-		summary["communications"] = seed_communications(100)
-		summary["client_kyc"] = seed_client_kyc(120)
-		summary["compliance_records"] = seed_compliance_records(30)
-		summary["insurer_rfq_rules"] = seed_insurer_rfq_rules()
+		# Bootstrap Single used by Policy/Claim controllers before bulk inserts
+		_ensure_insurance_settings()
+
+		_run("providers", seed_providers)
+		_run("schemes", seed_schemes)
+		_run("agents", seed_agents)
+		_run("hospitals", seed_hospitals)
+		_run("clients", seed_clients, CLIENT_COUNT)
+		_run("policies", seed_policies, POLICY_COUNT)
+		_run("claims", seed_claims, CLAIM_COUNT)
+		_run("flow_showcase_claims", seed_flow_showcase_claims)
+
+		try:
+			opp, quo = seed_opportunities_and_quotations(OPP_QUO_COUNT)
+			summary["opportunities"] = opp
+			summary["quotations"] = quo
+			frappe.db.commit()
+		except Exception as e:
+			_log_seed_error("opportunities", e)
+			summary["opportunities"] = 0
+			summary["quotations"] = 0
+
+		_run("grievances", seed_grievances, GRIEVANCE_COUNT)
+		_run("commission_rules", seed_commission_rules)
+		_run("reinsurance_treaties", seed_reinsurance_treaty)
+		_run("cashless_authorizations", seed_cashless_authorizations, 40)
+		_run("policy_endorsements", seed_policy_endorsements, 60)
+		_run("claim_recoveries", seed_claim_recoveries, 25)
+		_run("commission_payouts", seed_commission_payouts, 80)
+		_run("communications", seed_communications, 100)
+		_run("client_kyc", seed_client_kyc, 120)
+		_run("compliance_records", seed_compliance_records, 30)
+		_run("insurer_rfq_rules", seed_insurer_rfq_rules)
+
+		# Curated broker RFQ showcase: 5 opportunities × 3–4 RFQs
+		try:
+			rfq_showcase = seed_showcase_opportunities_and_rfqs()
+			summary["showcase_opportunities"] = rfq_showcase.get("opportunities", 0)
+			summary["showcase_rfq_details"] = rfq_showcase.get("rfq_details", 0)
+			summary["showcase_erpnext_rfqs"] = rfq_showcase.get("erpnext_rfqs", 0)
+			summary["showcase_quotations"] = rfq_showcase.get("quotations", 0)
+			summary["opportunities"] = (summary.get("opportunities") or 0) + (
+				rfq_showcase.get("opportunities") or 0
+			)
+			summary["quotations"] = (summary.get("quotations") or 0) + (
+				rfq_showcase.get("quotations") or 0
+			)
+			frappe.db.commit()
+		except Exception as e:
+			_log_seed_error("showcase_rfqs", e)
+			summary.setdefault("showcase_opportunities", 0)
+			summary.setdefault("showcase_rfq_details", 0)
+
+		# Sample desk / portal users (password: Demo@Insure1)
+		try:
+			from insurance_core.create_sample_users import create_sample_users
+
+			user_results = create_sample_users()
+			summary["sample_users"] = len(user_results)
+			summary["sample_users_detail"] = user_results
+		except Exception as e:
+			_log_seed_error("sample_users", e)
+			summary["sample_users"] = 0
+
+		if _SEED_ERRORS:
+			summary["seed_errors"] = dict(_SEED_ERRORS)
+			try:
+				frappe.logger("insurance_core").error(
+					f"demo_data seed_errors: {_SEED_ERRORS}"
+				)
+			except Exception:
+				pass
 
 		frappe.db.commit()
 	finally:
@@ -2570,8 +3257,11 @@ def install_demo_data_from_ui():
 			f"<li>Policies: {summary.get('policies', 0)} (distributed across schemes)</li>"
 			f"<li>Claims: {summary.get('claims', 0)}</li>"
 			f"<li>Flow showcase claims (AI triage demos): {summary.get('flow_showcase_claims', 0)}</li>"
-			f"<li>Opportunities: {summary.get('opportunities', 0)}</li>"
+			f"<li>Opportunities: {summary.get('opportunities', 0)} "
+			f"(incl. showcase {summary.get('showcase_opportunities', 0)})</li>"
 			f"<li>Quotations: {summary.get('quotations', 0)}</li>"
+			f"<li>Showcase RFQ Details: {summary.get('showcase_rfq_details', 0)} "
+			f"(3–4 per OPP-RFQ-DEMO-*)</li>"
 			f"<li>Grievances: {summary.get('grievances', 0)}</li>"
 			f"<li>Cashless Authorizations: {summary.get('cashless_authorizations', 0)}</li>"
 			f"<li>Policy Endorsements: {summary.get('policy_endorsements', 0)}</li>"
@@ -2581,12 +3271,25 @@ def install_demo_data_from_ui():
 			f"<li>Client KYC: {summary.get('client_kyc', 0)}</li>"
 			f"<li>Compliance Records: {summary.get('compliance_records', 0)}</li>"
 			f"<li>Insurer RFQ Rules: {summary.get('insurer_rfq_rules', 0)}</li>"
+			f"<li>Sample users: {summary.get('sample_users', 0)} "
+			f"(manager@ / agent@ / claims@ / compliance@ / user@ / client@insurance.demo — password: <b>Demo@Insure1</b>)</li>"
 			f"</ul>"
 			f"<p><b>Flow demo:</b> open <code>CLM-FLOW-DEMO-01</code> … <code>06</code>, "
 			f"then Desk → AI → Setup Flow Agent (once) → AI Triage.</p>"
+			f"<p><b>RFQ demo:</b> open <code>OPP-RFQ-DEMO-01</code> … <code>05</code> "
+			f"and linked Insurance RFQ Detail rounds.</p>"
 		),
 		indicator="green",
 	)
+	errs = summary.get("seed_errors") or {}
+	if errs:
+		lines = "".join(f"<li><code>{k}</code>: {v}</li>" for k, v in list(errs.items())[:12])
+		frappe.msgprint(
+			title="Some demo seeders reported errors",
+			msg=f"<p>Policies/claims may be incomplete. First error per area:</p><ul>{lines}</ul>"
+			f"<p>Check <code>bench --site &lt;site&gt; console</code> / Error Log for details.</p>",
+			indicator="orange",
+		)
 	return summary
 
 
@@ -2608,7 +3311,7 @@ def maybe_prompt_and_install():
 		if click.confirm(
 			"\\n  Install Indian-context demo / sample data for Insurance Core?\\n"
 			"  (~800 clients, 600 policies, 150 claims, 6 Flow AI triage showcase claims,\\n"
-			"   20 schemes across providers)\\n"
+			"   20 schemes across providers, 6 sample users with password Demo@Insure1)\\n"
 			"  You can also install later via: bench execute insurance_core.demo_data.install_demo_data",
 			default=False,
 		):
