@@ -1,0 +1,455 @@
+{
+  "info": {
+    "name": "Insurance Core API",
+    "description": "HTTP RPC endpoints for the Insurance Core Frappe app (portal, AI triage, RFQ, policy upload, provider API).\n\nSet collection variables: baseUrl, apiKey, apiSecret, policy, claim.\n\nAuth: run Login (cookie) or set Authorization header token {{apiKey}}:{{apiSecret}}.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:8000" },
+    { "key": "apiKey", "value": "" },
+    { "key": "apiSecret", "value": "" },
+    { "key": "policy", "value": "" },
+    { "key": "claim", "value": "" },
+    { "key": "opportunity", "value": "" },
+    { "key": "session_id", "value": "" }
+  ],
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      { "key": "key", "value": "Authorization", "type": "string" },
+      { "key": "value", "value": "token {{apiKey}}:{{apiSecret}}", "type": "string" },
+      { "key": "in", "value": "header", "type": "string" }
+    ]
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "usr", "value": "client@example.com", "type": "text" },
+                { "key": "pwd", "value": "password", "type": "text" }
+              ]
+            },
+            "url": "{{baseUrl}}/api/method/login",
+            "description": "Session login. Saves sid cookie for subsequent requests."
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/method/logout"
+          }
+        },
+        {
+          "name": "Get logged user",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/method/frappe.auth.get_logged_user"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Portal",
+      "item": [
+        {
+          "name": "portal_me",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/method/insurance_core.portal.portal_me",
+            "description": "Current user + linked Insurance Client."
+          }
+        },
+        {
+          "name": "portal_dashboard",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/method/insurance_core.portal.portal_dashboard"
+          }
+        },
+        {
+          "name": "portal_search",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/method/insurance_core.portal.portal_search?q=pol&limit=10",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "method", "insurance_core.portal.portal_search"],
+              "query": [
+                { "key": "q", "value": "pol" },
+                { "key": "limit", "value": "10" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "portal_list_policies",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/method/insurance_core.portal.portal_list_policies"
+          }
+        },
+        {
+          "name": "portal_get_policy",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/method/insurance_core.portal.portal_get_policy?policy={{policy}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "method", "insurance_core.portal.portal_get_policy"],
+              "query": [{ "key": "policy", "value": "{{policy}}" }]
+            }
+          }
+        },
+        {
+          "name": "portal_list_claims",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/method/insurance_core.portal.portal_list_claims"
+          }
+        },
+        {
+          "name": "portal_get_claim",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/method/insurance_core.portal.portal_get_claim?claim={{claim}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "method", "insurance_core.portal.portal_get_claim"],
+              "query": [{ "key": "claim", "value": "{{claim}}" }]
+            }
+          }
+        },
+        {
+          "name": "portal_intimate_claim",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "policy", "value": "{{policy}}" },
+                { "key": "claim_type", "value": "Reimbursement" },
+                { "key": "incident_date", "value": "2026-09-20" },
+                { "key": "claimed_amount", "value": "25000" },
+                { "key": "description", "value": "Hospitalization - sample intimation" },
+                { "key": "claimant", "value": "" }
+              ]
+            },
+            "url": "{{baseUrl}}/api/method/insurance_core.portal.portal_intimate_claim"
+          }
+        },
+        {
+          "name": "portal_upload_claim_document",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "claim", "value": "{{claim}}" },
+                { "key": "document_type", "value": "Bills" },
+                { "key": "file_url", "value": "/files/sample-bill.pdf" }
+              ]
+            },
+            "url": "{{baseUrl}}/api/method/insurance_core.portal.portal_upload_claim_document",
+            "description": "Pass file_url from /api/method/upload_file. Allowed types: Discharge Summary, Bills, Reports, ID Proof, FIR, Estimate, Other."
+          }
+        },
+        {
+          "name": "portal_request_endorsement",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "policy", "value": "{{policy}}" },
+                { "key": "endorsement_type", "value": "Address Change" },
+                { "key": "description", "value": "Updated residential address" },
+                { "key": "new_value", "value": "New Address Line" },
+                { "key": "effective_date", "value": "2026-10-15" }
+              ]
+            },
+            "url": "{{baseUrl}}/api/method/insurance_core.portal.portal_request_endorsement"
+          }
+        },
+        {
+          "name": "portal_policy_print",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/method/insurance_core.portal.portal_policy_print?policy={{policy}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "method", "insurance_core.portal.portal_policy_print"],
+              "query": [{ "key": "policy", "value": "{{policy}}" }]
+            },
+            "description": "Returns HTML for policy schedule."
+          }
+        },
+        {
+          "name": "portal_claim_print",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/method/insurance_core.portal.portal_claim_print?claim={{claim}}&settlement=0",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "method", "insurance_core.portal.portal_claim_print"],
+              "query": [
+                { "key": "claim", "value": "{{claim}}" },
+                { "key": "settlement", "value": "0", "description": "Set 1 for settlement letter" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "portal_chat",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "message", "value": "What documents are needed for a reimbursement claim?" },
+                { "key": "session_id", "value": "{{session_id}}" }
+              ]
+            },
+            "url": "{{baseUrl}}/api/method/insurance_core.portal.portal_chat"
+          }
+        },
+        {
+          "name": "portal_chat_reset",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/method/insurance_core.portal.portal_chat_reset"
+          }
+        }
+      ]
+    },
+    {
+      "name": "AI Triage",
+      "item": [
+        {
+          "name": "run_claim_ai_triage",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "claim_name", "value": "{{claim}}" },
+                { "key": "apply_status_change", "value": "1" }
+              ]
+            },
+            "url": "{{baseUrl}}/api/method/insurance_core.ai_triage.run_claim_ai_triage",
+            "description": "Requires Frappe Flow. apply_status_change=0 for advisory only."
+          }
+        },
+        {
+          "name": "setup_claim_ai_triage",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/method/insurance_core.ai_triage.setup_claim_ai_triage",
+            "description": "Idempotent setup of Flow tools, agent, and claim AI fields."
+          }
+        }
+      ]
+    },
+    {
+      "name": "RFQ (Broker)",
+      "item": [
+        {
+          "name": "create_rfq_from_opportunity",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "opportunity", "value": "{{opportunity}}" },
+                { "key": "max_insurers", "value": "5" }
+              ]
+            },
+            "url": "{{baseUrl}}/api/method/insurance_core.rfq.create_rfq_from_opportunity",
+            "description": "Path may vary with install layout (rfq extension). Creates ERPNext RFQ + Insurance RFQ Detail."
+          }
+        },
+        {
+          "name": "select_insurers_on_detail",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "detail_name", "value": "" },
+                { "key": "max_insurers", "value": "5" }
+              ]
+            },
+            "url": "{{baseUrl}}/api/method/insurance_core.rfq.select_insurers_on_detail"
+          }
+        },
+        {
+          "name": "select_winning_quote",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "insurance_quotation", "value": "" }
+              ]
+            },
+            "url": "{{baseUrl}}/api/method/insurance_core.rfq.select_winning_quote"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Policy PDF Upload",
+      "item": [
+        {
+          "name": "parse_policy_pdf",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "name", "value": "POLICY-UPLOAD-0001" }
+              ]
+            },
+            "url": "{{baseUrl}}/api/method/insurance_core.policy_upload.doctype.policy_upload.policy_upload.parse_policy_pdf",
+            "description": "Actual dotted path depends on package install. Prefer Desk button or run_doc_method."
+          }
+        },
+        {
+          "name": "create_client_and_policy",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "name", "value": "POLICY-UPLOAD-0001" }
+              ]
+            },
+            "url": "{{baseUrl}}/api/method/insurance_core.policy_upload.doctype.policy_upload.policy_upload.create_client_and_policy"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Provider API",
+      "item": [
+        {
+          "name": "test_connection",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "name", "value": "" }
+              ]
+            },
+            "url": "{{baseUrl}}/api/method/insurance_core.provider_api.doctype.insurance_provider_api.insurance_provider_api.test_connection",
+            "description": "Path may vary; use Desk Test Connection or frappe.client.run_doc_method."
+          }
+        },
+        {
+          "name": "fetch_quote",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "name", "value": "" },
+                { "key": "context", "value": "{}" }
+              ]
+            },
+            "url": "{{baseUrl}}/api/method/insurance_core.provider_api.doctype.insurance_provider_api.insurance_provider_api.fetch_quote"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Resources (examples)",
+      "item": [
+        {
+          "name": "List Insurance Policies",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/resource/Insurance Policy?fields=[\"name\",\"policy_number\",\"status\",\"client\"]&limit_page_length=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "resource", "Insurance Policy"],
+              "query": [
+                { "key": "fields", "value": "[\"name\",\"policy_number\",\"status\",\"client\"]" },
+                { "key": "limit_page_length", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Insurance Claim",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/resource/Insurance Claim/{{claim}}"
+          }
+        },
+        {
+          "name": "List open claims",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/resource/Insurance Claim?filters=[[\"status\",\"not in\",[\"Settled\",\"Closed\",\"Rejected\"]]]&limit_page_length=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "resource", "Insurance Claim"],
+              "query": [
+                { "key": "filters", "value": "[[\"status\",\"not in\",[\"Settled\",\"Closed\",\"Rejected\"]]]" },
+                { "key": "limit_page_length", "value": "20" }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
